@@ -22,7 +22,8 @@ EXAMPLES = ./examples
 
 INC_FLAGS = -I $(INCLUDE) -I $(LOCAL_DIR)/include
 LOCAL_LIBS = -lpqr -lzLib -lpythia8
-LIB_FLAGS = -lstdc++ -lm -lQtCore -lfastjet -L $(LOCAL_DIR)/lib $(LOCAL_LIBS)  -L $(PJ_DIR) -lpj
+EXTERN_LIB_FLAGS = -lstdc++ -lm -lQtCore -lfastjet -L $(LOCAL_DIR)/lib $(LOCAL_LIBS)
+LIB_FLAGS = $(EXTERN_LIB_FLAGS) -L $(PJ_DIR) -lpj
 
 EXAMPLES_CPP = $(wildcard examples/*.cpp)
 EXAMPLES_X = $(patsubst %.cpp, %.x, $(EXAMPLES_CPP))
@@ -30,20 +31,23 @@ EXAMPLES_X = $(patsubst %.cpp, %.x, $(EXAMPLES_CPP))
 FILENAMES = ArrogantDetector SpectralPower 
 OBJS = $(addsuffix .o, $(addprefix $(SOURCE)/, $(FILENAMES)))
 
-all : libpqr.so $(EXAMPLES_X)
+all : lib $(EXAMPLES_X)
 
-libpj.so: $(OBJS)
-	$(CXX) $(CXXFLAGS) -shared $(OBJS) $(LIB_FLAGS) -o $(PJ_DIR)/$@
+lib : $(PJ_DIR)/libpj.so
 
-%.x : %.cpp # $(PQR_DIR)/libpqr.so
+$(PJ_DIR)/libpj.so: $(OBJS)
+	$(CXX) $(CXXFLAGS) -shared $(OBJS) $(EXTERN_LIB_FLAGSs) -o $@
+
+%.x : %.cpp $(PJ_DIR)/libpj.so
 	$(CXX) $(CXXFLAGS) $(INC_FLAGS) $(LIB_FLAGS) $*.cpp -o $@
 	
 %.o : %.cpp 
-	$(CXX) $(CXXFLAGS) $(INC_FLAGS) $(LIB_FLAGS) $*.cpp -c -o $*.o
+	$(CXX) $(CXXFLAGS) $(INC_FLAGS) $(EXTERN_LIB_FLAGS) $*.cpp -c -o $*.o
 	
 .PHONY: clean
 
 clean:
 	rm -f $(SOURCE)/*.o
-#	rm -f $(EXAMPLES_X)
 	rm -f $(PJ_DIR)/libpj.so
+	rm -f examples/*.x
+	rm -f testing/*.x

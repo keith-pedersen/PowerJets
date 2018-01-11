@@ -1,6 +1,7 @@
 #include "SpectralPower.hpp"
 #include "SelfOuterU.hpp"
 #include "helperTools.hpp"
+#include "RecursiveLegendre.hpp"
 #include <array>
 #include <future>
 
@@ -241,103 +242,42 @@ std::vector<SpectralPower::real_t> SpectralPower::operator()
 
 std::vector<typename SpectralPower::real_t> SpectralPower::H_l_threadedIncrement()
 {
-	// Worker arrays for the recursive P_l loop. std::array improves the 
-	// compilers ability to auto-vectorize (fixed width, good alignment)
-	using incrementArray_t = std::array<real_t, Outer_Increment::incrementSize>;
-	
 	// Allocate a vector of H_l to return, which we constantly add to (so initialize to zero).
 	// H_l[0] actually corresponds to l == 1 (because H_0 = 1 always), so allocate lMax.
 	std::vector<real_t> H_l_vec(settings.lMax, 0.);
 	
 	if(H_l_vec.size())
 	{
-		// As we process the P_l recursion in the l-loop,
-		// we need to swap Pl_this -> Pl_last, Pl_next -> Pl_this.
-		// But std::array::swap is VERY slow (versus std::vector), 
-		// b/c its an element-wise swap (versus swapping the std::vector.data() pointer). 
-		// The solution: create 3 x Pl worker arrays which we alias with pointers, 
-		// then swap the pointers (essentially mimic std::vector swap,
-		// just using a fixed width array(for better compiler optimization, 
-		// since we know exactly how long each increment will be).
-		incrementArray_t
-			pDot_local, fProd_local, // increments of pDot and fProd, filled by outer
-			Pl_A, Pl_B, Pl_C, // shere Pl_last, Pl_this and Pl_next will be stored
+		RecursiveLegendre<real_t, Outer_Increment::incrementSize> Pl_calc;
+		
+		using incrementArray_t = decltype(Pl_calc)::incrementArray_t;	
+		
+		incrementArray_t 
+			fProd_increment, // increments of fProd, filled by outer
 			H_l_accumulate; // the elements (P_l * fProd)_k, which we sum
-		
-		// Named aliases for the three P_l arrays.
-		// Use __restrict to tell the compiler that they'll never collide (for optimization).
-		// (__restrict works for GCC, Clang, VCC and Intel, while __restric__ is just GCC and Clang).
-		incrementArray_t* __restrict Pl_last = &Pl_A;
-		incrementArray_t* __restrict Pl_this = &Pl_B;
-		incrementArray_t* __restrict Pl_next = &Pl_C;
-		
-		// IMPORTANT: before we begin, we MUST initialize Pl_last,
-		// even though every increment uses Pl_last_coeff = 0. in the first iteration.
-		// This is because 0.*nan -> nan. so if Pl_last is not initialized, 
-		// a few elements can often randomly equal nan (which uses a 
-		// special exponent) and this nan will contaminate the final H_l.
-		// After the first increment, every Pl array will only contain numbers,
-		// so we don't have to worry about nan again.
-		Pl_last->fill(0.);
 		
 		size_t lengthSet; // The length of pDot and fProd set by outer.Next(pDot, fProd)
 		
-		// outer.Next() fills increments of pDot and fProd. 
+		// outer.Next() fills increments of pDot and fProd.
+		// We fill pDot directly into Pl_calc.
+		// WARNING must call Pl_calc.Reset() to reset l = 0. 
 		// The length of pDot and fProd which are set is returned by Next().
 		// The last increment is not full, and is padded with zeroes by outer.Next(), 
-		// which ensures that the last elements of S_l_accumulate are also zero.
+		// which ensures that the last elements of H_l_accumulate are also zero.
 		// Keep going until the lengthSet == 0 (using bool(0) = false, bool(x>0) == true).
-		while(bool(lengthSet = outer.Next(pDot_local, fProd_local)))
+		while(bool(lengthSet = outer.Next(Pl_calc.z, fProd_increment)))
 		{
-			assert(lengthSet <= Outer_Increment::incrementSize);
-			
-			// l corresponds to Pl_this, with each iteration of the loop setting Pl_next.
-			// The "coeff" is the numerical pre-factor in the P_l recursion (e.g. (2l + 1))
-			// We start the loop with l = 0. 
-			real_t Pl_next_coeff = 1.; // (l + 1)
-			real_t Pl_this_coeff = 1.; // (2l + 1)
-			real_t Pl_last_coeff = 0.; // (-l)
-			
-			Pl_this->fill(1.); // P_0(x) = 1
-			// No need to init Pl_last, provided it's not nan
-			
-			//~ size_t const loopStop = 
-				//~ (lengthSet == Outer_Increment::incrementSize) ? Outer_Increment::incrementSize : 
-				//~ LargestBit(lengthSet) * 2; // Last increment, calculate till power-of-2 alignment 
-			
-			//~ assert(loopStop <= Outer_Increment::incrementSize);
-			//~ assert(loopStop >= lengthSet);
-			//~ assert(IsPowerOfTwo(loopStop));
+			Pl_calc.Reset(); 
 				
 			for(real_t& H_l : H_l_vec) // Recursively set H_l
 			{
-				// NOTE: gcc won't auto-vectorize if the iterator has a 
-				// smaller data type than the data type of the loop bound, 
-				// because it can't ensure that the loop will terminate 
-				// (from iterator overflow). Must use size_t.
+				auto const P_l_increment = Pl_calc.Next(); // Get the next P_l
+				
+				// Do a dot product with fProd
 				for(size_t i = 0; i < Outer_Increment::incrementSize; ++i)
-				{
-					// To vectorize this loop, we can't try to manually manage registers 
-					// (i.e. by storing each Pl_next_i to a real_t const)
-					(*Pl_next)[i] = 
-						(Pl_this_coeff * pDot_local[i] * (*Pl_this)[i] 
-						+ Pl_last_coeff * (*Pl_last)[i])/Pl_next_coeff;
-					
-					H_l_accumulate[i] = (*Pl_next)[i] * fProd_local[i];
-				}
+					H_l_accumulate[i] = P_l_increment[i] * fProd_increment[i];
 							
-				H_l += BinaryAccumulate_Destructive(H_l_accumulate);//, loopStop);
-				
-				Pl_next_coeff += 1.; // (l + 1)				
-				Pl_this_coeff += 2.; // (2l + 1)								
-				Pl_last_coeff -= 1.; // (-l)
-				
-				{
-					incrementArray_t* const Pl_newNext = Pl_last;
-					Pl_last = Pl_this; // Pl_this -> Pl_last
-					Pl_this = Pl_next; // Pl_next -> Pl_this
-					Pl_next = Pl_newNext; // Pl_last -> Pl_next
-				}
+				H_l += BinaryAccumulate_Destructive(H_l_accumulate);
 			}// Done l-loop
 		}// Done increment loop
 	}// Done with outer
