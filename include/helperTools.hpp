@@ -116,11 +116,11 @@ real_t ReadAngle(std::string const& toParse)
 
 ////////////////////////////////////////////////////////////////////////
 
-//! @brief Partition n things into partitions of size m. How many do you need?
+//! @brief Partition \p n things into partitions of size \p partSize. How many do you need?
 template<typename uint_t>
-uint_t MinPartitions(uint_t const n, uint_t const m)
+uint_t MinPartitions(uint_t const n, uint_t const partSize)
 {
-	return (n - 1)/m + 1;
+	return (n - 1)/partSize + 1;
 }
 
 ////////////////////////////////////////////////////////////////////////

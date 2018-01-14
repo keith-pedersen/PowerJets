@@ -13,7 +13,7 @@ STABILITY_WARNINGS = -Wall -Wextra -W -Wconversion -Wshadow -Wpointer-arith -Wca
 PERFORMANCE_FLAGS = -O2 -march=$(MARCH) -msse4 -mavx2 -Winline -Wdisabled-optimization -Wpadded -ftree-vectorize # vectorize is the only thing from O3 that we want
 BUILD_LIB_FLAGS = -fPIC
 # 
-CXXFLAGS = -std=$(STD) $(STABILITY_WARNINGS) $(PERFORMANCE_FLAGS) $(BUILD_LIB_FLAGS)
+CXXFLAGS = -std=$(STD) $(STABILITY_WARNINGS) $(PERFORMANCE_FLAGS) $(BUILD_LIB_FLAGS) -g #-fopt-info-vec-optimized
 
 # The directory structure of pqRand
 INCLUDE = ./include
@@ -28,7 +28,7 @@ LIB_FLAGS = $(EXTERN_LIB_FLAGS) -L $(PJ_DIR) -lpj
 EXAMPLES_CPP = $(wildcard examples/*.cpp)
 EXAMPLES_X = $(patsubst %.cpp, %.x, $(EXAMPLES_CPP))
 
-FILENAMES = ArrogantDetector SpectralPower 
+FILENAMES = ArrogantDetector SpectralPower NjetModel
 OBJS = $(addsuffix .o, $(addprefix $(SOURCE)/, $(FILENAMES)))
 
 all : lib $(EXAMPLES_X)

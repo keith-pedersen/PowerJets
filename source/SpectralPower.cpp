@@ -248,9 +248,9 @@ std::vector<typename SpectralPower::real_t> SpectralPower::H_l_threadedIncrement
 	
 	if(H_l_vec.size())
 	{
-		RecursiveLegendre<real_t, Outer_Increment::incrementSize> Pl_calc;
+		RecursiveLegendre<real_t, Outer_Increment::incrementSize> Pl_computer;
 		
-		using incrementArray_t = decltype(Pl_calc)::incrementArray_t;	
+		using incrementArray_t = decltype(Pl_computer)::incrementArray_t;	
 		
 		incrementArray_t 
 			fProd_increment, // increments of fProd, filled by outer
@@ -259,19 +259,19 @@ std::vector<typename SpectralPower::real_t> SpectralPower::H_l_threadedIncrement
 		size_t lengthSet; // The length of pDot and fProd set by outer.Next(pDot, fProd)
 		
 		// outer.Next() fills increments of pDot and fProd.
-		// We fill pDot directly into Pl_calc.
-		// WARNING must call Pl_calc.Reset() to reset l = 0. 
+		// We fill pDot directly into Pl_computer.
+		// WARNING must call Pl_computer.Reset() to reset l = 0. 
 		// The length of pDot and fProd which are set is returned by Next().
 		// The last increment is not full, and is padded with zeroes by outer.Next(), 
 		// which ensures that the last elements of H_l_accumulate are also zero.
 		// Keep going until the lengthSet == 0 (using bool(0) = false, bool(x>0) == true).
-		while(bool(lengthSet = outer.Next(Pl_calc.z, fProd_increment)))
+		while(bool(lengthSet = outer.Next(Pl_computer.z, fProd_increment)))
 		{
-			Pl_calc.Reset(); 
+			Pl_computer.Reset(); 
 				
 			for(real_t& H_l : H_l_vec) // Recursively set H_l
 			{
-				auto const P_l_increment = Pl_calc.Next(); // Get the next P_l
+				auto const P_l_increment = Pl_computer.Next(); // Get the next P_l
 				
 				// Do a dot product with fProd
 				for(size_t i = 0; i < Outer_Increment::incrementSize; ++i)
