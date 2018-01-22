@@ -2,14 +2,53 @@
 #include "RecursiveLegendre.hpp"
 #include "pqRand/pqRand.hpp"
 #include <algorithm> // std::max
-#include "helperTools.hpp"
+#include "kdp/kdpTools.hpp"
 
-void Jet::SampleShape(incrementArray_t& z, incrementArray_t& xy_sinPhi, 
+////////////////////////////////////////////////////////////////////////
+
+Jet::Jet(real_t const x1, real_t const x2, real_t const x3, 
+	real_t const w0, kdp::Vec4from2 const w0type):
+Jet(vec3_t(x1, x2, x3), w0, w0type) {}
+
+////////////////////////////////////////////////////////////////////////
+
+Jet::Jet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type):
+p4(w0, p3_in, w0type) // This will catch invalid w0 and throw exceptions
+{
+	switch(w0type)
+	{
+		case kdp::Vec4from2::Energy:
+		case kdp::Vec4from2::Time:
+			mass = p4.Length();
+		break;
+		
+		case kdp::Vec4from2::Length:
+		case kdp::Vec4from2::Mass:
+			mass = w0;
+		break;
+		
+		case kdp::Vec4from2::Boost_preserve_p3:
+		case kdp::Vec4from2::Boost_preserve_E:
+			mass = p4.x0 / w0;
+		break;
+		
+		case kdp::Vec4from2::BoostMinusOne_preserve_p3:
+		case kdp::Vec4from2::BoostMinusOne_preserve_E:
+			mass = p4.x0 / (w0 + real_t(1));
+		break;
+	}
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void ShapedJet::SampleShape(incrementArray_t& z, incrementArray_t& xy_sinPhi, 
 	pqRand::engine& gen) const
 {
 	// We will boost z_CM into the lab frame
 	// We assume boost collimates particles towards +z axis in the lab
-	real_t const beta = p4.p().Mag() / p4.x0;
+	real_t const gamma2 = kdp::Squared(p4.x0 / mass);
+	real_t const beta = vec4_t::BetaFrom_Mass_pSquared(mass, p4.p().Mag2());
+	
 	static constexpr size_t subIncrement = (incrementSize / 2);
 	
 	for(size_t i = 0; i < subIncrement; ++i)
@@ -21,7 +60,7 @@ void Jet::SampleShape(incrementArray_t& z, incrementArray_t& xy_sinPhi,
 		// z = z_lab =  (beta + z_CM)/(1 + beta * z_CM)	
 		{
 			// w+ = 1 - z = (1 - beta)(1 - z_CM)/(1 + beta * z_CM)
-			real_t const w_plus = u / ((real_t(1) + beta) * kdp::Squared(p4.x0 / mass) * 
+			real_t const w_plus = u / ((real_t(1) + beta) * gamma2 * 
 				(real_t(1) + beta * (real_t(1) - u)));
 			//~ assert(w_plus > real_t(0));
 			//~ assert(w_plus <= real_t(2));
@@ -45,18 +84,340 @@ void Jet::SampleShape(incrementArray_t& z, incrementArray_t& xy_sinPhi,
 	}
 }
 
+////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::ShowerParticle(ShowerParticle* mother_in, 
+	vec3_t const& p3_in, real_t const mass_in, vec3_t const& pol_in):
+ShapedJet(p3_in, mass_in, kdp::Vec4from2::Mass),
+mother(mother_in),
+b(nullptr), c(nullptr), 
+pol(pol_in), inexact(false)
+{}
+
+////////////////////////////////////////////////////////////////////////
+
+void ShowerParticle::Split(param_iter_t const param_begin, param_iter_t param_end)
+{
+	splittingParams = std::vector<real_t>(param_begin, param_end);
+		
+	// We need at least 3 splitting parameters.  Get them last to first, 
+	// because an exception will be thrown by at(2) if there are not enough.
+	real_t const zStar = splittingParams.at(2);
+	real_t const ubFrac = splittingParams[1]; // We now know that size is at least 3
+	real_t const uSum = splittingParams[0];
+	
+	real_t const uDiff = (real_t(2) * ubFrac - real_t(1)) * uSum;
+					
+	vec3_t const& p3_a = p4.p();
+	real_t const pSquared = p3_a.Mag2();
+	real_t const massSquared = kdp::Squared(mass);
+	
+	// We find p3_b and the new polarization vector
+	vec3_t p3_b(p3_a);
+	vec3_t newPol(false);
+			
+	// Find how much of p3_b is parallel to p3_a
+	{
+		// If pSquared == 0, then b = inf, and b * p() == nan 
+		// (even though we expect b * p() to be zero).
+		real_t const r = (pSquared == real_t(0)) ? real_t(0) : 
+			real_t(0.5)*(real_t(1) + uDiff * uSum + 
+			(real_t(2) * zStar - real_t(1)) * 
+			std::sqrt((massSquared + pSquared)/ pSquared * Delta2(uSum, uDiff)));
+		
+		p3_b *= r;
+	}
+	
+	// Inside this scope there are three calls to Normalize()
+	// The last two are crucial, the first one perhaps not so much.
+	// However, since we can only remove 1/3 of them, leave them all.
+	{
+		// Get a's normalized direction of travel
+		vec3_t const p_hat = p3_a / std::sqrt(pSquared);
+		
+		// If no phi is supplied, we assume phi = 0; pol does not rotate.
+		if(splittingParams.size() == 3) // We've already ensured size >= 3
+			newPol = pol;
+		else
+		{
+			real_t const phi = splittingParams[3];
+			
+			// The polarization vector rotates by phi degrees.
+			// 	rotated = cos * original + sin * transverse
+			// We obtain the transverse unit vector via (pol x pHat)
+			vec3_t const kT_hat = pol.Cross(p_hat).Normalize();
+			// We (silently) enforce |phi| < pi/2 by simply forcing cos to be positive
+			newPol = (pol * std::fabs(std::cos(phi)) + kT_hat * std::sin(phi)).Normalize();
+		}
+		
+		real_t const kT_mag = std::sqrt(zStar * (real_t(1) - zStar) * 
+			kdp::Diff2(real_t(1), uSum) * kdp::Diff2(real_t(1), uDiff) * massSquared);
+										
+		p3_b += newPol.Cross(p_hat).Normalize() * kT_mag;
+	}
+	
+	MakeDaughters(p3_b, ubFrac * uSum, uSum, newPol);
+}
+		
+////////////////////////////////////////////////////////////////////////
+
+void ShowerParticle::MakeDaughters(vec3_t const& p3_b, 
+	real_t const u_b, real_t const uSum, vec3_t const& newPol)
+{
+	
+	b = new ShowerParticle(this, p3_b, u_b * mass, newPol);
+	c = new ShowerParticle(this, p4.p() - p3_b, uSum * mass - b->mass, newPol);
+	
+	//~ b = std::shared_ptr<ShowerParticle>(new ShowerParticle(this, p3_b, u_b * mass, newPol));
+	//~ c = std::shared_ptr<ShowerParticle>(new ShowerParticle(this, p4.p() - p3_b, uSum * mass - b->mass, newPol));
+	
+	/* With floating point arithmetic, we can guarantee that
+	 * 	(larger - smaller) + smaller = larger
+	 * So because we defined p_c by subtraction, we can guarantee momentum conservation.
+	 * What we cannot guarantee is that energy is conserved, 
+	 * since we define the two daughters via their 3-momentum and mass, 
+	 * and these *should* add up to the original mass, but there is no guarantee
+	*/
+	inexact = (EnergyLoss_unsafe() not_eq real_t(0));
+			
+	//~ printf("%.16e, %.16e\n", sum.x0, p4.x0);
+	//~ printf("%.16e\n", kdp::RelDiff(sum.x0, p4.x0));
+	//~ assert(kdp::AbsRelDiff(sum.x0, p4.x0) < 10.*std::numeric_limits<real_t>::epsilon());
+	// All 4-momentum worked out as it should
+	//~ printf("(%.16e, %.16e, %.16e, %.16e)\n", sum.x0, sum.x1, sum.x2, sum.x3);
+	//~ assert((p4 - sum).Length() < 10.*std::numeric_limits<real_t>::epsilon());
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void ShowerParticle::AppendJets(std::vector<ShapedJet>& existing)
+{
+	if(isLeaf())
+		existing.push_back(*this);
+	else
+	{
+		b->AppendJets(existing);
+		c->AppendJets(existing);
+	}		
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::real_t ShowerParticle::Delta2(real_t const uSum, real_t const uDiff)
+{
+	return kdp::Diff2(real_t(1), uSum)*kdp::Diff2(real_t(1), uDiff);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+std::string ShowerParticle::AddressToString(std::vector<bool> const& address)
+{
+	std::string addStr;
+	
+	for(bool const node : address)
+		addStr += (node ? "1" : "0");
+		
+	return addStr;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::address_error ShowerParticle::NoSuchAddress
+	(std::vector<bool> const& address, size_t const level)
+{
+	return address_error("ShowerParticle::address_error. No such address <" 
+		+ AddressToString(address) + ">; fails at level " + std::to_string(level) + ".");
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::address_error ShowerParticle::AddressAlreadySplit
+	(std::vector<bool> const& address)
+{
+	return address_error("ShowerParticle::address_error. Address <" 
+		+ AddressToString(address) + "> already split, cannot split again.");
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::ShowerParticle(std::vector<real_t> const& params, 
+	std::vector<std::vector<bool>> const& addresses):
+ShapedJet(vec3_t(), real_t(1), kdp::Vec4from2::Mass),
+mother(nullptr), pol(), inexact(false)
+{
+	static constexpr size_t numRootParams = 2;
+	using vec3_t = ShowerParticle::vec3_t;
+	
+	// The root splitting needs 2 parameters
+	if(params.size() >= numRootParams)
+	{
+		splittingParams = std::vector<real_t>(params.cbegin(), 
+			params.cbegin() + numRootParams);
+		
+		real_t const uSum = splittingParams[0];
+		real_t const ubFrac = splittingParams[1];
+	
+		real_t const uDiff = (real_t(2)*ubFrac - real_t(1)) * uSum;
+	
+		MakeDaughters(vec3_t(0., 0., 0.5*std::sqrt(Delta2(uSum, uDiff))),
+			ubFrac * uSum, uSum, vec3_t(1., 0., 0.));
+	}
+	
+	if(not addresses.empty())
+	{
+		if((4 * addresses.size() - 1) not_eq (params.size() - numRootParams))
+			throw std::runtime_error("ShowerParticle: Wrong number of parameters supplied " +
+				std::string("(2 for the first particle, 3 for the second, 4 for all subsequent)"));
+		
+		param_iter_t params_begin = params.cbegin() + numRootParams;
+		
+		for(size_t i = 0; i < addresses.size(); ++i)
+		{
+			param_iter_t params_end = params_begin + ((i == 0) ? 3 : 4);
+			ShowerParticle& toSplit = LocateParticle(addresses[i]);
+			
+			if(toSplit.isBranch())
+				throw AddressAlreadySplit(addresses[i]);
+			
+			toSplit.Split(params_begin, params_end);
+			
+			params_begin = params_end;
+		}
+	}
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle& ShowerParticle::operator=(ShowerParticle&& orig)
+{
+	std::swap(mother, orig.mother);
+	std::swap(b, orig.b);
+	std::swap(c, orig.c);
+	return *this;
+}		
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::~ShowerParticle()
+{
+	delete b;
+	delete c;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+bool ShowerParticle::isBranch()
+{
+	// Consistency check; either both b and c are initialized, or they are both nullptr
+	assert(bool(b) == bool(c));
+	return bool(b);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+bool ShowerParticle::isShowerInexact()
+{
+	if(isLeaf()) // A leaf cannot be inexact
+		return false;
+	else
+	{
+		if(inexact) // Stop the search once we find the first inexact splitting
+			return true;
+		else
+			return (b->isShowerInexact() or c->isShowerInexact());
+	}
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle& ShowerParticle::LocateParticle(std::vector<bool> const& address)
+{
+	// Starting here, navigate down until we locate address
+	ShowerParticle* currentNode = this;
+	// The level is the index of the current bool
+	size_t level = 0; // Slower than an iterator, but more readible. This function is not what takes the time.
+	
+	while(level < address.size())
+	{
+		// If currentNode is a leaf, we can't derefence b or c; this address makes no sense.
+		if(currentNode->isLeaf())
+			throw NoSuchAddress(address, level);
+		else
+			currentNode = address[level++] ? currentNode->c : currentNode->b;
+			//~ currentNode = address[level++] ? currentNode->c.get() : currentNode->b.get();
+			// Since we are not going to delete currentNode, it is same to use pointers directly
+	}
+	
+	return *currentNode;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+std::vector<ShapedJet> ShowerParticle::GetJets()
+{
+	std::vector<ShapedJet> retVec;			
+	AppendJets(retVec);
+	
+	return retVec;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::real_t ShowerParticle::EnergyLoss()
+{
+	if(isLeaf())
+		return real_t(0);
+	else
+		return EnergyLoss_unsafe();
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::vec4_t ShowerParticle::Total_p4()
+{
+	std::vector<vec4_t> p4_vec;
+	
+	for(auto const& jet : GetJets()) // Convert jets to 4-vectors
+		p4_vec.push_back(jet.p4);
+		
+	return kdp::BinaryAccumulate_Destructive(p4_vec);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::real_t ShowerParticle::Total_absElost(real_t const absElost_in)
+{
+	if(isLeaf())
+		return real_t(0);
+	else
+		return absElost_in + (std::fabs(EnergyLoss()) + 
+			(b->Total_absElost() + c->Total_absElost()));
+}
+
+////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
+
 NjetModel::NjetModel(QSettings const& settings):
 	gen() {} //, computer(settings), detector(ArrogantDetector::NewDetector(settings)) {}
-	
+
+////////////////////////////////////////////////////////////////////////
+
 NjetModel::NjetModel(std::string const& iniFileName):
 	NjetModel(QSettings(iniFileName.c_str(), QSettings::IniFormat)) {}
 
+////////////////////////////////////////////////////////////////////////
+
 NjetModel::NjetModel():NjetModel(QSettings()) {}
+
+////////////////////////////////////////////////////////////////////////
 
 NjetModel::~NjetModel() {}//delete detector;}
 
-std::vector<NjetModel::real_t> NjetModel::operator()
-	(std::vector<Jet> const& jetVec_unsorted, 
+////////////////////////////////////////////////////////////////////////
+
+std::vector<NjetModel::real_t> NjetModel::H_l
+	(std::vector<ShapedJet> const& jetVec_unsorted, 
 	size_t const lMax, real_t const jetShapeGranularity) const
 {
 	// Return H_l from (l = 1) to (l = lMax)
@@ -96,36 +457,36 @@ std::vector<NjetModel::real_t> NjetModel::operator()
 	if(lMax > 0)
 	{
 		// First sort the incoming jetVec from high to low energy.
-		std::vector<Jet> jetVec = jetVec_unsorted;
+		std::vector<ShapedJet> jetVec = jetVec_unsorted;
 		
 		// We can use lambdas (no-capture, empty square bracket) to use some standard tools with Jet class
 		std::sort(jetVec.begin(), jetVec.end(), 
-			[](Jet const& lhs, Jet const& rhs) {return lhs.p4.x0 > rhs.p4.x0;});
+			[](ShapedJet const& lhs, ShapedJet const& rhs) {return lhs.p4.x0 > rhs.p4.x0;});
 		
 		// Add up energy from back to front (small to large)
 		real_t const Etot = std::accumulate(jetVec.crbegin(), jetVec.crend(), real_t(0), 
 			// a lambda which sums jet energy for a std::accumulate
-			[](real_t const E_current, Jet const& jet) {return E_current + jet.p4.x0;});
+			[](real_t const E_current, ShapedJet const& jet) {return E_current + jet.p4.x0;});
 			
-		using incrementArray_t = Jet::incrementArray_t;
+		using incrementArray_t = ShapedJet::incrementArray_t;
 		
 		// Each jet's will fill shape variate positions into these two arrays
 		incrementArray_t z_lab, y_lab;
 		
 		std::vector<std::vector<real_t>> rho; // The rho for each jet_j (and each l)
-		RecursiveLegendre<real_t, Jet::incrementSize> Pl_computer;
+		RecursiveLegendre<real_t, ShapedJet::incrementSize> Pl_computer;
 		
 		// In the following outer loops, we will use i and j because it makes
 		// the code more readable. Being outer loops, the penalty is tiny.
 		for(size_t i = 0; i < jetVec.size(); ++i)
 		{
-			Jet const& jet_i = jetVec[i];
+			ShapedJet const& jet_i = jetVec[i];
 			
 			size_t const n_requested = 
 				std::max(1lu, 
 					//~ (jet_i->p4.x0 < 1e3*jet_i->mass) ? 0 : 
 						size_t(jet_i.p4.x0 * jetShapeGranularity / Etot));
-			size_t const n_increments = MinPartitions(n_requested, Jet::incrementSize);
+			size_t const n_increments = kdp::MinPartitions(n_requested, ShapedJet::incrementSize);
 			
 			// The number of variates can be very high, so we obtain
 			// them in increments, and for each increment loop over jet_j.
@@ -179,34 +540,23 @@ std::vector<NjetModel::real_t> NjetModel::operator()
 						
 					auto const& cos_sin = cos_sin_ij[j];
 					
-					for(size_t m = 0; m < Jet::incrementSize; ++m)
+					for(size_t m = 0; m < ShapedJet::incrementSize; ++m)
 					{
 						Pl_computer.z[m] = cos_sin.first * z_lab[m] + cos_sin.second * y_lab[m];
-						
-						//~ // When the CM of the jets is boosted a bit in the lab frame, 
-						//~ // I was encountering a problem where
-						//~ // H_l would diverge quite significantly after only a few l.
-						//~ // Installing this bounds check completely fixed the problem.
-						//~ if(std::fabs(Pl_computer.z[m]) > real_t(1))
-						//~ {
-							//~ printf("(%.3e %.3e) (%.3e, %.3e) %.16f\n", cos_sin.first, cos_sin.second, 
-								//~ z[m], xy_sinPhi[m],
-								//~ Pl_computer.z[m]);
-							//~ Pl_computer.z[m] = std::round(Pl_computer.z[m]);
-						//~ }
+						// WARNING. May want to check that |z| <= 1
 					}
 					
 					Pl_computer.Reset();
 					
 					// loop over l
 					for(auto& rho_accumulate_j_l : rho_accumulate[j]) 
-						rho_accumulate_j_l += BinaryAccumulate(Pl_computer.Next());
+						rho_accumulate_j_l += kdp::BinaryAccumulate(Pl_computer.Next());
 				}
 			}
 			
 			// Do jet_i's energy and sample-size normalization once (to reduce FLOPS and rounding error)
 			{
-				real_t const normalization = jet_i.p4.x0 / real_t(n_increments * Jet::incrementSize);
+				real_t const normalization = jet_i.p4.x0 / real_t(n_increments * ShapedJet::incrementSize);
 				
 				for(size_t j = 0; j < i; ++j)
 				{
@@ -248,8 +598,8 @@ std::vector<NjetModel::real_t> NjetModel::operator()
 		{
 			real_t const normalization = kdp::Squared(Etot);
 		
-			for(real_t& H_l : H_l_vec)
-				H_l /= normalization;
+			for(real_t& H_el : H_l_vec)
+				H_el /= normalization;
 		}
 	}
 		
@@ -353,7 +703,7 @@ std::vector<NjetModel::vec4_t> NjetModel::GetJets(std::vector<double> const& jet
 			vec3_t p3(jetParams[i], jetParams[i + 1], jetParams[i + 2]);
 			double const mass = jetParams[i + 3];
 			
-			double const energy = std::sqrt(p3.Mag2() + kdp::Squared(mass));
+			double const energy = std::sqrt(p3.Mag2() + Squared(mass));
 			//~ double const energy = p3.Mag(); // v2
 			
 			assert(energy >= mass);
@@ -477,7 +827,7 @@ std::vector<SpectralPower::vec3_t> NjetModel::IsoCM(size_t const n_request, pqRa
 			// How large should sum.Mag() be allowed to grow?
 			// The balance vectors will be able to fix any sum.Mag() < 2.
 			// If we requie sum.Mag() < 1., then we'll shim twice as often.
-			double const sum_Mag2_max = kdp::Squared(2.)*(1.- tolerance);
+			double const sum_Mag2_max = Squared(2.)*(1.- tolerance);
 			
 			do // Keep regenerating isoVec until it is balanced (normally first times a charm)
 			{				

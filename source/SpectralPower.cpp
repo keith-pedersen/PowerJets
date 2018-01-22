@@ -1,6 +1,6 @@
 #include "SpectralPower.hpp"
 #include "SelfOuterU.hpp"
-#include "helperTools.hpp"
+#include "kdp/kdpTools.hpp"
 #include "RecursiveLegendre.hpp"
 #include <array>
 #include <future>
@@ -228,7 +228,7 @@ std::vector<SpectralPower::real_t> SpectralPower::operator()
 			for(real_t& f : fCopy)
 				f = f*f;
 				
-			f2sum = BinaryAccumulate_Destructive(fCopy);
+			f2sum = kdp::BinaryAccumulate_Destructive(fCopy);
 		}
 		
 		for(real_t& H_l : H_l_vec)
@@ -277,7 +277,7 @@ std::vector<typename SpectralPower::real_t> SpectralPower::H_l_threadedIncrement
 				for(size_t i = 0; i < Outer_Increment::incrementSize; ++i)
 					H_l_accumulate[i] = P_l_increment[i] * fProd_increment[i];
 							
-				H_l += BinaryAccumulate_Destructive(H_l_accumulate);
+				H_l += kdp::BinaryAccumulate_Destructive(H_l_accumulate);
 			}// Done l-loop
 		}// Done increment loop
 	}// Done with outer

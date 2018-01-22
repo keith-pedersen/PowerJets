@@ -7,9 +7,9 @@
  *  @date August 2017
 */
  
-#include "zLib/kdpVectors.hpp"
+#include "kdp/kdpVectors.hpp"
 #include "pqRand/pqRand.hpp"
-#include "zLib/kdpRandom.hpp"
+//~ #include "zLib/kdpRandom.hpp"
 #include "SelfOuterU.hpp"
 #include "Pythia8/Event.h"
 #include <QtCore/QSettings>

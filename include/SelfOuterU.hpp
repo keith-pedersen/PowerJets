@@ -94,7 +94,7 @@
 #include <vector>
 #include <array>
 #include <assert.h>
-#include "helperTools.hpp"
+#include "kdp/kdpTools.hpp"
 
 /*! @defgroup OperatorClass 
  *  When the \ref SOP is emplaced in target, we may want to do either
@@ -206,7 +206,7 @@ void SelfOuterU(std::vector<T> const& source, std::vector<T>& target,
 	T const offDiagonalFactor)
 {
 	if(operation<T>::doResize)
-		target.resize(GaussSum(source.size()));
+		target.resize(kdp::GaussSum(source.size()));
 	
 	auto const target_end_actual = 
 		SelfOuterU_Worker<operation, T>
@@ -233,7 +233,7 @@ template<template<typename T> class operation, size_t tileWidth, typename T>
 void TiledSelfOuterU(std::vector<T> const& source, 
 	std::vector<T>& target, T const offDiagonalFactor)
 {
-	static_assert(IsPowerOfTwo(tileWidth), "TiledSelfOuterU: tileWidth must be a power of two");
+	static_assert(kdp::IsPowerOfTwo(tileWidth), "TiledSelfOuterU: tileWidth must be a power of two");
 	
 	size_t const numFullTiles = source.size() / tileWidth;
 	size_t const centralSpan = numFullTiles * tileWidth;
@@ -243,9 +243,9 @@ void TiledSelfOuterU(std::vector<T> const& source,
 	auto const center_end = source.begin() + centralSpan;
 	
 	size_t const newSize = 
-		GaussSum(numFullTiles) * tileWidth * tileWidth // full tiles
+		kdp::GaussSum(numFullTiles) * tileWidth * tileWidth // full tiles
 			+ overSpill * centralSpan // right edge
-				+ GaussSum(overSpill); // final diagonal
+				+ kdp::GaussSum(overSpill); // final diagonal
 	
 	if(operation<T>::doResize) // When we set, we must resize the target.
 		target.resize(newSize);
@@ -345,7 +345,7 @@ void TiledSelfOuterU(std::vector<T> const& source,
 template<typename T, template<typename T> class operation, size_t tileWidth>
 class TiledSelfOuterU_Incremental
 {
-	static_assert(IsPowerOfTwo(tileWidth), "TiledSelfOuterU_Incremental: tileWidth must be a power of two");
+	static_assert(kdp::IsPowerOfTwo(tileWidth), "TiledSelfOuterU_Incremental: tileWidth must be a power of two");
 	
 	public:
 		//! @brief the size of one increment = tileWidth**2 (one full tile's worth of information).
@@ -483,14 +483,14 @@ size_t TiledSelfOuterU_Incremental<T, operation, tileWidth>::Setup
 		else
 		{	
 			state = OuterState::Center;
-			size_t numIncrements = GaussSum(numFullTiles); // the number of center tiles
+			size_t numIncrements = kdp::GaussSum(numFullTiles); // the number of center tiles
 			
 			size_t const overSpill = source->size() - centralSpan;
 			
 			if(overSpill > 0)
 			{
 				size_t const rightEdgeSize = centralSpan * overSpill;
-				size_t const rightEdgeIncrements = MinPartitions(rightEdgeSize, incrementSize);
+				size_t const rightEdgeIncrements = kdp::MinPartitions(rightEdgeSize, incrementSize);
 				
 				numIncrements += rightEdgeIncrements;
 			
@@ -502,7 +502,7 @@ size_t TiledSelfOuterU_Incremental<T, operation, tileWidth>::Setup
 				// we will place it in the final increment of the right edge.
 				// Otherwise we will place it in a new increment of its own
 				// (since we'll need one more increment anyway).
-				if(roomForFinalDiagonal >= GaussSum(overSpill))
+				if(roomForFinalDiagonal >= kdp::GaussSum(overSpill))
 					finalDiagonalState = OuterState::FinalDiagonal_piggyback;
 				else
 				{

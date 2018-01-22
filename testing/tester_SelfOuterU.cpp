@@ -46,30 +46,30 @@ int main()
 		
 		bool fail = false;
 		
-		double const sourceSum_binary = BinaryAccumulate(source);
+		double const sourceSum_binary = kdp::BinaryAccumulate(source);
 		double const sourceSum_std = std::accumulate(source.begin(), source.end(), 0.);
 		
-		// Test that the BinaryAccumulate gives nearly the same answer as std::accumulate
-		if(std::fabs(RelDiff(sourceSum_binary, sourceSum_std) > 1e-15))
+		// Test that the kdp::BinaryAccumulate gives nearly the same answer as std::accumulate
+		if(std::fabs(kdp::RelDiff(sourceSum_binary, sourceSum_std) > 1e-15))
 			fail = true;
 		
 		auto& vec = target_incremental;
 		auto randomPos = vec.begin() + (gen() % vec.size());
 		// vec.erase(randomPos, randomPos + 1); // This causes failure very quickly,
 		// which validates the following test.
-		double const targetSum2_untiled = BinaryAccumulate(target_untiled);
-		double const targetSum2_tiled = BinaryAccumulate(target_tiled);
-		double const targetSum2_incremental = BinaryAccumulate(target_incremental);
+		double const targetSum2_untiled = kdp::BinaryAccumulate(target_untiled);
+		double const targetSum2_tiled = kdp::BinaryAccumulate(target_tiled);
+		double const targetSum2_incremental = kdp::BinaryAccumulate(target_incremental);
 		
 		// Test that sqrt(sum(outer product)) matches the sum of the source
 		// This is a fairly good way to ensure that the outer product is correctly calculated
-		if(std::fabs(RelDiff(sourceSum_binary, std::sqrt(targetSum2_untiled))) > 1e-15)
+		if(std::fabs(kdp::RelDiff(sourceSum_binary, std::sqrt(targetSum2_untiled))) > 1e-15)
 			fail = true;
 			
-		if(std::fabs(RelDiff(sourceSum_binary, std::sqrt(targetSum2_tiled))) > 1e-15)
+		if(std::fabs(kdp::RelDiff(sourceSum_binary, std::sqrt(targetSum2_tiled))) > 1e-15)
 			fail = true;
 			
-		if(std::fabs(RelDiff(sourceSum_binary, std::sqrt(targetSum2_incremental))) > 1e-15)
+		if(std::fabs(kdp::RelDiff(sourceSum_binary, std::sqrt(targetSum2_incremental))) > 1e-15)
 			fail = true;
 		
 		std::array<double, 64> test;
@@ -77,7 +77,7 @@ int main()
 			test[i] = gen.U_uneven();
 		
 		// Test the std::array version of the code	
-		if(std::fabs(RelDiff(BinaryAccumulate(test), std::accumulate(test.begin(), test.end(), 0.))) > 1e-15)
+		if(std::fabs(kdp::RelDiff(kdp::BinaryAccumulate(test), std::accumulate(test.begin(), test.end(), 0.))) > 1e-15)
 			fail = true;
 			
 		if(fail)

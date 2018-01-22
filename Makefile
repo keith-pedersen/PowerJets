@@ -21,9 +21,9 @@ SOURCE = ./source
 EXAMPLES = ./examples
 
 INC_FLAGS = -I $(INCLUDE) -I $(LOCAL_DIR)/include
-LOCAL_LIBS = -lpqr -lzLib -lpythia8
-EXTERN_LIB_FLAGS = -lstdc++ -lm -lQtCore -lfastjet -L $(LOCAL_DIR)/lib $(LOCAL_LIBS)
-LIB_FLAGS = $(EXTERN_LIB_FLAGS) -L $(PJ_DIR) -lpj
+LOCAL_LIBS = -lpythia8 -lfastjet -lpqr -lkdp
+EXTERN_LIB_FLAGS = -lstdc++ -lm -lQtCore -L $(LOCAL_DIR)/lib $(LOCAL_LIBS)
+LIB_FLAGS = $(EXTERN_LIB_FLAGS) -L $(PJ_DIR) -lpJets
 
 EXAMPLES_CPP = $(wildcard examples/*.cpp)
 EXAMPLES_X = $(patsubst %.cpp, %.x, $(EXAMPLES_CPP))
@@ -33,12 +33,12 @@ OBJS = $(addsuffix .o, $(addprefix $(SOURCE)/, $(FILENAMES)))
 
 all : lib $(EXAMPLES_X)
 
-lib : $(PJ_DIR)/libpj.so
+lib : $(PJ_DIR)/libpJets.so
 
-$(PJ_DIR)/libpj.so: $(OBJS)
+$(PJ_DIR)/libpJets.so: $(OBJS)
 	$(CXX) $(CXXFLAGS) -shared $(OBJS) $(EXTERN_LIB_FLAGSs) -o $@
 
-%.x : %.cpp $(PJ_DIR)/libpj.so
+%.x : %.cpp $(PJ_DIR)/libpJets.so
 	$(CXX) $(CXXFLAGS) $(INC_FLAGS) $(LIB_FLAGS) $*.cpp -o $@
 	
 %.o : %.cpp 

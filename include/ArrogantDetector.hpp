@@ -1,7 +1,7 @@
 #ifndef ARROGANT_DETECTOR
 #define ARROGANT_DETECTOR
 
-#include "helperTools.hpp"
+#include "kdp/kdpTools.hpp"
 #include "SpectralPower.hpp" // Need to define vector types
 #include "Pythia8/Pythia.h"
 #include "Pythia8/Event.h"

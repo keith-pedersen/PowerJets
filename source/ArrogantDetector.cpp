@@ -5,7 +5,7 @@
 ArrogantDetector::towerID_t ArrogantDetector::Settings::Read_numPhiBins_central
 (QSettings const& parsedINI, std::string const& detectorName, char const* const defaultValue)
 {
-	return towerID_t(std::round((2.*M_PI)/ReadAngle<double>(parsedINI.
+	return towerID_t(std::round((2.*M_PI)/kdp::ReadAngle<double>(parsedINI.
 		value((detectorName + "/squareWidth").c_str(), defaultValue).
 			toString().toStdString())));
 }
@@ -47,8 +47,8 @@ ArrogantDetector::vec3_t ArrogantDetector::EtaToVec(double const eta)
 void ArrogantDetector::Init_inDerivedCTOR()
 {
 	polarMax = AbsPolarAngle(vec3_t(0., 0., 1.));
-	polarMax_cal = RoundToNearestPitch(AbsPolarAngle(EtaToVec(settings.etaMax_cal)), settings.squareWidth);
-	polarMax_track = RoundToNearestPitch(AbsPolarAngle(EtaToVec(settings.etaMax_track)), settings.squareWidth);
+	polarMax_cal = kdp::RoundToNearestPitch(AbsPolarAngle(EtaToVec(settings.etaMax_cal)), settings.squareWidth);
+	polarMax_track = kdp::RoundToNearestPitch(AbsPolarAngle(EtaToVec(settings.etaMax_track)), settings.squareWidth);
 
 	tooBigID = towerID_t(std::round(polarMax_cal / settings.squareWidth)) * settings.numPhiBins_centralBand;
 }
