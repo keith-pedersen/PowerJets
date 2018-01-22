@@ -382,10 +382,12 @@ class NjetModel
 	private:
 		mutable pqRand::engine gen;
 		
+		//! @brief Do the work in the i-loop of H_l
 		static std::vector<std::vector<real_t>> DoIncrements_jet_i
 			(size_t const i, size_t const lMax,
 			std::vector<ShapedJet> const& jetVec,
-			kdp::MutexCount<size_t>& kShared, size_t const numIncrements,
+			//~ kdp::MutexCount<size_t>& kShared, 
+			size_t const numIncrements,
 			std::string const& generator_seed);
 		
 	public:
@@ -398,7 +400,7 @@ class NjetModel
 		 *  return H_l from (l = 1) to (l = lMax).
 		 * 
 		 *  \param lMax 	the maximum \p returned
-		 *  \param jetShapeGranularity	approximately how many random numbers will be draawn  
+		 *  \param jetShapeGranularity	approximately how many random numbers will be drawn  
 		*/ 
 		std::vector<real_t> H_l(std::vector<ShapedJet> const& jetVec_unsorted, 
 			size_t const lMax, real_t const jetShapeGranularity) const;
