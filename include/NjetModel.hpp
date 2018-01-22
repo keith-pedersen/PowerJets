@@ -373,15 +373,22 @@ class ShowerParticle : public ShapedJet
 */
 class NjetModel
 {
-	private:
-		mutable pqRand::engine gen;
-		
 	public:
 		using vec3_t = Jet::vec3_t;
 		using vec4_t = Jet::vec4_t;
 		using real_t = SpectralPower::real_t;
 		//~ typedef SpectralPower::PhatF PhatF;
 	
+	private:
+		mutable pqRand::engine gen;
+		
+		static std::vector<std::vector<real_t>> DoIncrements_jet_i
+			(size_t const i, size_t const lMax,
+			std::vector<ShapedJet> const& jetVec,
+			kdp::MutexCount<size_t>& kShared, size_t const numIncrements,
+			std::string const& generator_seed);
+		
+	public:
 		NjetModel(QSettings const& settings);
 		NjetModel(std::string const& iniFileName);
 		NjetModel();

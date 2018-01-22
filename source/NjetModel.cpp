@@ -2,6 +2,7 @@
 #include "RecursiveLegendre.hpp"
 #include "pqRand/pqRand.hpp"
 #include <algorithm> // std::max
+#include <future>
 #include "kdp/kdpTools.hpp"
 
 ////////////////////////////////////////////////////////////////////////
@@ -416,6 +417,87 @@ NjetModel::~NjetModel() {}//delete detector;}
 
 ////////////////////////////////////////////////////////////////////////
 
+std::vector<std::vector<NjetModel::real_t>> NjetModel::DoIncrements_jet_i
+	(size_t const i, size_t const lMax, std::vector<ShapedJet> const& jetVec,
+	kdp::MutexCount<size_t>& kShared, size_t const numIncrements,
+	std::string const& generator_seed)
+{
+	pqRand::engine gen(false);
+	gen.Seed_FromString(generator_seed);
+	
+	RecursiveLegendre<real_t, ShapedJet::incrementSize> Pl_computer;
+	
+	using incrementArray_t = decltype(Pl_computer)::incrementArray_t;
+	
+	// Each jet will fill shape variate positions into these two arrays
+	incrementArray_t z_lab, y_lab;
+
+	// To avoid the redundant calculation of inter-jet cos/sin as we 
+	// repeatedly loop over the same j, we calculate then during
+	// the first increment and reuse it for all others.
+	std::vector<std::pair<real_t, real_t>> cos_sin_ij;
+	cos_sin_ij.reserve(i + 1);
+	
+	std::vector<std::vector<real_t>> rho_accumulate(i + 1, 
+		std::vector<real_t>(lMax, 0));
+		
+	ShapedJet const& jet_i = jetVec[i];
+	bool firstIncrement = true;
+						
+	while(kShared++ < numIncrements)
+	{
+		// These are the positions when jet_i is boosted to the lab, 
+		// but still parallel to the z axis. They must be rotated off-axis
+		// for each jet_j.		
+		jet_i.SampleShape(z_lab, y_lab, gen);
+		
+		for(size_t j = 0; j <= i; ++j)
+		{
+			if(firstIncrement) // Find and cache interior angle
+			{
+				if(j == i)
+					cos_sin_ij.emplace_back(1, 0);
+				else
+				{
+					vec3_t const& p3_i = jet_i.p4.p();
+					vec3_t const& p3_j = jetVec[j].p4.p();
+								
+					real_t const mag2_ij = p3_i.Mag2() * p3_j.Mag2();
+					
+					cos_sin_ij.emplace_back(
+						p3_i.Dot(p3_j)/std::sqrt(mag2_ij), 
+						std::sqrt(p3_i.Cross(p3_j).Mag2()/mag2_ij));
+				
+					// Check for over-unity from rounding (but they can't BOTH be over-unity)
+					// Rare, so who cares that round is slower than copysign
+					if(std::abs(cos_sin_ij.back().first) > real_t(1))
+						cos_sin_ij.back().first = std::round(cos_sin_ij.back().first);
+					else if(std::abs(cos_sin_ij.back().second) > real_t(1))
+						cos_sin_ij.back().second = std::round(cos_sin_ij.back().second);
+				}
+			}
+				
+			auto const& cos_sin = cos_sin_ij[j];
+			
+			for(size_t m = 0; m < ShapedJet::incrementSize; ++m)
+			{
+				Pl_computer.z[m] = cos_sin.first * z_lab[m] + cos_sin.second * y_lab[m];
+				// WARNING. May want to check that |z| <= 1
+			}
+			
+			Pl_computer.Reset();
+			
+			// loop over l
+			for(auto& rho_accumulate_j_l : rho_accumulate[j]) 
+				rho_accumulate_j_l += kdp::BinaryAccumulate(Pl_computer.Next());
+		}
+		
+		firstIncrement = false;
+	}
+		
+	return rho_accumulate;
+}
+
 std::vector<NjetModel::real_t> NjetModel::H_l
 	(std::vector<ShapedJet> const& jetVec_unsorted, 
 	size_t const lMax, real_t const jetShapeGranularity) const
@@ -468,14 +550,8 @@ std::vector<NjetModel::real_t> NjetModel::H_l
 			// a lambda which sums jet energy for a std::accumulate
 			[](real_t const E_current, ShapedJet const& jet) {return E_current + jet.p4.x0;});
 			
-		using incrementArray_t = ShapedJet::incrementArray_t;
-		
-		// Each jet's will fill shape variate positions into these two arrays
-		incrementArray_t z_lab, y_lab;
-		
 		std::vector<std::vector<real_t>> rho; // The rho for each jet_j (and each l)
-		RecursiveLegendre<real_t, ShapedJet::incrementSize> Pl_computer;
-		
+				
 		// In the following outer loops, we will use i and j because it makes
 		// the code more readable. Being outer loops, the penalty is tiny.
 		for(size_t i = 0; i < jetVec.size(); ++i)
@@ -491,66 +567,56 @@ std::vector<NjetModel::real_t> NjetModel::H_l
 			// The number of variates can be very high, so we obtain
 			// them in increments, and for each increment loop over jet_j.
 			// This minimizes the memory overhead.
-			// To avoid the redundant calculation of inter-jet cos/sin as we 
-			// repeatedly loop over the same j, we calculate then during
-			// the first increment and reuse it for all others.
-			std::vector<std::pair<real_t, real_t>> cos_sin_ij;
-			cos_sin_ij.reserve(i + 1);
+			// Additionally, since each increment can be done separately, 
+			// we can launch a number of threads which accomplish many increments each.
+			size_t const numThreads = 4;
 			
-			// We accumulate each jet_i's rho before placing it in H_l,
-			// because each jet_i has its own normalization, 
+			// Thread will share a count, incrementing until kShared == n_increments.
+			kdp::MutexCount<size_t> kShared(0);
+			
+			// Each thread accumulates a matrix rho_j_l for jet_i.
+			// We keep each jet_k separate because they each have there own normalization,
 			// and we would prefer to normalize as little as possible.
-			// Also we can accumulate all of rho_i before
-			// adding it to the sum over all rho_i*rho_j.
-			std::vector<std::vector<real_t>> rho_accumulate(i + 1, 
-				std::vector<real_t>(lMax, 0));
-						
-			for(size_t k = 0; k < n_increments; ++k)
-			{
-				// These are the positions when jet_i is boosted to the lab, 
-				// but still parallel to the z axis. They must be rotated off-axis
-				// for each jet_j.		
-				jet_i.SampleShape(z_lab, y_lab, gen);
+			std::vector<std::vector<real_t>> rho_accumulate;
+			
+			// We need to use std::future for each thread's return value
+			// Each thread will return a 2D matrix of floats
+			std::vector<std::future<
+				std::vector<std::vector<real_t>>>> threadReturn;
 				
-				for(size_t j = 0; j <= i; ++j)
+			// Each thread should have it's own PRNG. 
+			// Instead of trying to pass PRNG objects, pass the state string
+			std::vector<std::string> seedVec = gen.GetState_JumpVec(numThreads);
+			
+			// Create/launch all threads and bind their return value
+			for(size_t t = 0; t < numThreads; ++t)
+			{
+				// Note, member pointer must be &class::func not &(class::func)
+				// https://stackoverflow.com/questions/7134197/error-with-address-of-parenthesized-member-function
+				threadReturn.push_back(
+					std::async(std::launch::async, &NjetModel::DoIncrements_jet_i,
+					i, lMax, 
+					std::ref(jetVec), std::ref(kShared), 
+					n_increments, std::ref(seedVec[t])));
+			}
+			
+			for(size_t t = 0; t < numThreads; ++t)
+			{
+				// Get the result (get() will block until the result is ready)
+				std::vector<std::vector<real_t>> const& rho_accumulate_thread = threadReturn[t].get();
+				
+				if(t == 0)
+					rho_accumulate = std::move(rho_accumulate_thread);
+				else
 				{
-					if(k == 0) // First increment, find and cache interior angle
+					for(size_t j = 0; j < rho_accumulate.size(); ++j)
 					{
-						if(j == i)
-							cos_sin_ij.emplace_back(1, 0);
-						else
-						{
-							vec3_t const& p3_i = jet_i.p4.p();
-							vec3_t const& p3_j = jetVec[j].p4.p();
-										
-							real_t const mag2_ij = p3_i.Mag2() * p3_j.Mag2();
-							
-							cos_sin_ij.emplace_back(
-								p3_i.Dot(p3_j)/std::sqrt(mag2_ij), 
-								std::sqrt(p3_i.Cross(p3_j).Mag2()/mag2_ij));
+						std::vector<real_t>& rho_accumulate_j = rho_accumulate[j];
+						std::vector<real_t> const& rho_accumulate_thread_j = rho_accumulate_thread[j];
 						
-							// Check for over-unity from rounding (but they can't BOTH be over-unity)
-							// Rare, so who cares that round is slower than copysign
-							if(std::abs(cos_sin_ij.back().first) > real_t(1))
-								cos_sin_ij.back().first = std::round(cos_sin_ij.back().first);
-							else if(std::abs(cos_sin_ij.back().second) > real_t(1))
-								cos_sin_ij.back().second = std::round(cos_sin_ij.back().second);
-						}
+						for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+							rho_accumulate_j[lMinus1] += rho_accumulate_thread_j[lMinus1];
 					}
-						
-					auto const& cos_sin = cos_sin_ij[j];
-					
-					for(size_t m = 0; m < ShapedJet::incrementSize; ++m)
-					{
-						Pl_computer.z[m] = cos_sin.first * z_lab[m] + cos_sin.second * y_lab[m];
-						// WARNING. May want to check that |z| <= 1
-					}
-					
-					Pl_computer.Reset();
-					
-					// loop over l
-					for(auto& rho_accumulate_j_l : rho_accumulate[j]) 
-						rho_accumulate_j_l += kdp::BinaryAccumulate(Pl_computer.Next());
 				}
 			}
 			
