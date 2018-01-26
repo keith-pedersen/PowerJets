@@ -13,6 +13,11 @@ Jet(vec3_t(x1, x2, x3), w0, w0type) {}
 
 ////////////////////////////////////////////////////////////////////////
 
+Jet::Jet(fastjet::PseudoJet const& pj):
+	Jet(pj.px(), pj.py(), pj.pz(), pj.E(), kdp::Vec4from2::Energy) {}
+
+////////////////////////////////////////////////////////////////////////
+
 Jet::Jet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type):
 p4(w0, p3_in, w0type) // This will catch invalid w0 and throw exceptions
 {
@@ -42,7 +47,7 @@ p4(w0, p3_in, w0type) // This will catch invalid w0 and throw exceptions
 
 ////////////////////////////////////////////////////////////////////////
 
-void ShapedJet::SampleShape(incrementArray_t& z, incrementArray_t& xy_sinPhi, 
+void ShapedJet::SampleShape(incrementArray_t& z_lab, incrementArray_t& y_lab, 
 	pqRand::engine& gen) const
 {
 	// We will boost z_CM into the lab frame
@@ -52,11 +57,18 @@ void ShapedJet::SampleShape(incrementArray_t& z, incrementArray_t& xy_sinPhi,
 	
 	static constexpr size_t subIncrement = (incrementSize / 2);
 	
+	// This loop cannot be vectorized. There are a few reasons.
+	// 1. U_uneven and ApplyRandomSign both have random branches visible to the compiler.
+	// 2. sqrt and sin are functions whose control flow "cannot be analyzed".
+	// 	sqrt is probably in hardware but sin is probably not, 
+	//		and probably contains branches. I discovered #2 by separating 
+	//		the PRNG to a warmup loop. The sqrt/sin loop still wasn't vectorized.
+	// NOTE: in general, math function calls prohibit vectorization.
 	for(size_t i = 0; i < subIncrement; ++i)
 	{
 		// Draw one u to generate antithetic z values (hopefully to reduce variance)
-		real_t const u = gen.U_uneven();
-		// NOTE: must draw independent phi to avoid correlation between z and phi
+		real_t const u = gen.U_uneven(); 
+		// But draw independent phi to avoid correlation between z and phi
 		
 		// z = z_lab =  (beta + z_CM)/(1 + beta * z_CM)	
 		{
@@ -66,8 +78,8 @@ void ShapedJet::SampleShape(incrementArray_t& z, incrementArray_t& xy_sinPhi,
 			//~ assert(w_plus > real_t(0));
 			//~ assert(w_plus <= real_t(2));
 			
-			z[i] = real_t(1) - w_plus;
-			xy_sinPhi[i] = std::sqrt(w_plus * (real_t(2) - w_plus)) * 
+			z_lab[i] = real_t(1) - w_plus;
+			y_lab[i] = std::sqrt(w_plus * (real_t(2) - w_plus)) * 
 				gen.ApplyRandomSign(std::sin(gen.U_uneven() * M_PI_2));
 		}
 		
@@ -78,8 +90,8 @@ void ShapedJet::SampleShape(incrementArray_t& z, incrementArray_t& xy_sinPhi,
 			//~ assert(w_minus > real_t(0));
 			//~ assert(w_minus <= real_t(2));
 			
-			z[subIncrement + i] = w_minus - real_t(1);
-			xy_sinPhi[subIncrement + i] = std::sqrt(w_minus * (real_t(2) - w_minus)) * 
+			z_lab[subIncrement + i] = w_minus - real_t(1);
+			y_lab[subIncrement + i] = std::sqrt(w_minus * (real_t(2) - w_minus)) * 
 				gen.ApplyRandomSign(std::sin(gen.U_uneven() * M_PI_2));
 		}
 	}
@@ -421,84 +433,215 @@ std::vector<std::vector<NjetModel::real_t>> NjetModel::DoIncrements_jet_i
 	(size_t const i, size_t const lMax, std::vector<ShapedJet> const& jetVec,
 	//~ kdp::MutexCount<size_t>& kShared, 
 	size_t const numIncrements,
-	std::string const& generator_seed)
+	std::string const& generator_seed, 
+	bool const onlySelf)
 {
-	pqRand::engine gen(false);
+	pqRand::engine gen(false); // Don't auto-seed; gen is unitialized
 	gen.Seed_FromString(generator_seed);
 	
 	RecursiveLegendre<real_t, ShapedJet::incrementSize> Pl_computer;
-	
 	using incrementArray_t = decltype(Pl_computer)::incrementArray_t;
 	
 	// Each jet will fill shape variate positions into these two arrays
 	incrementArray_t z_lab, y_lab;
+	
+	size_t const j_begin = (onlySelf ? i : 0);
 
 	// To avoid the redundant calculation of inter-jet cos/sin as we 
 	// repeatedly loop over the same j, we calculate then during
 	// the first increment and reuse it for all others.
 	std::vector<std::pair<real_t, real_t>> cos_sin_ij;
-	cos_sin_ij.reserve(i + 1);
-	
-	std::vector<std::vector<real_t>> rho_accumulate(i + 1, 
+	bool firstIncrement = true;
+		
+	std::vector<std::vector<real_t>> rho_accumulate((i - j_begin) + 1, 
 		std::vector<real_t>(lMax, 0));
 		
-	ShapedJet const& jet_i = jetVec[i];
-	bool firstIncrement = true;
-						
-	//~ while(kShared++ < numIncrements)
-	for(size_t k = 0; k < numIncrements; ++k)
+	ShapedJet const& jet_i = jetVec[i];	
+	
+	for(size_t k = 0; k < numIncrements; ++k) // loop over increments
 	{
 		// These are the positions when jet_i is boosted to the lab, 
 		// but still parallel to the z axis. They must be rotated off-axis
 		// for each jet_j.		
 		jet_i.SampleShape(z_lab, y_lab, gen);
 		
-		for(size_t j = 0; j <= i; ++j)
+		for(size_t j = j_begin; j <= i; ++j)
 		{
 			if(firstIncrement) // Find and cache interior angle
 			{
 				if(j == i)
 					cos_sin_ij.emplace_back(1, 0);
 				else
-				{
-					vec3_t const& p3_i = jet_i.p4.p();
-					vec3_t const& p3_j = jetVec[j].p4.p();
-								
-					real_t const mag2_ij = p3_i.Mag2() * p3_j.Mag2();
-					
-					cos_sin_ij.emplace_back(
-						p3_i.Dot(p3_j)/std::sqrt(mag2_ij), 
-						std::sqrt(p3_i.Cross(p3_j).Mag2()/mag2_ij));
-				
-					// Check for over-unity from rounding (but they can't BOTH be over-unity)
-					// Rare, so who cares that round is slower than copysign
-					if(std::abs(cos_sin_ij.back().first) > real_t(1))
-						cos_sin_ij.back().first = std::round(cos_sin_ij.back().first);
-					else if(std::abs(cos_sin_ij.back().second) > real_t(1))
-						cos_sin_ij.back().second = std::round(cos_sin_ij.back().second);
-				}
+					cos_sin_ij.push_back(CosSin(jet_i.p4.p(), jetVec[j].p4.p()));
 			}
-				
 			auto const& cos_sin = cos_sin_ij[j];
 			
+			// WARNING. May want to check that |z| <= 1, otherwise recursive singularity
 			for(size_t m = 0; m < ShapedJet::incrementSize; ++m)
-			{
 				Pl_computer.z[m] = cos_sin.first * z_lab[m] + cos_sin.second * y_lab[m];
-				// WARNING. May want to check that |z| <= 1
-			}
-			
+				
 			Pl_computer.Reset();
 			
 			// loop over l
-			for(auto& rho_accumulate_j_l : rho_accumulate[j]) 
+			for(auto& rho_accumulate_j_l : rho_accumulate[j - j_begin])
 				rho_accumulate_j_l += kdp::BinaryAccumulate(Pl_computer.Next());
 		}
-		
-		firstIncrement = false;
+		firstIncrement = false; // After looping over all j, we have cached all cos_sin
 	}
-		
+	
 	return rho_accumulate;
 }
+
+////////////////////////////////////////////////////////////////////////
+
+std::pair<NjetModel::real_t, NjetModel::real_t> NjetModel::CosSin(vec3_t const& a, vec3_t const& b)
+{
+	real_t const mag2 = a.Mag2() * b.Mag2();
+
+	std::pair<real_t, real_t> cos_sin(
+		a.Dot(b)/std::sqrt(mag2), 
+		std::sqrt(a.Cross(b).Mag2()/mag2));
+	
+	// Check for over-unity from rounding (but they can't BOTH be over-unity)
+	// Rare, so who cares that round is slower than copysign
+	if(std::abs(cos_sin.first) > real_t(1))
+		cos_sin.first = std::round(cos_sin.first);
+	else if((std::abs(cos_sin.second) > real_t(1)))
+		cos_sin.second = std::round(cos_sin.second);
+		
+	return cos_sin;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+std::vector<std::vector<NjetModel::real_t>> NjetModel::rho_j_l(
+	size_t const i, size_t const lMax,
+	real_t const jetShapeGranularity, real_t const Etot,
+	std::vector<ShapedJet> const& jetVec_sorted,
+	bool const onlySelf) const
+{
+	std::vector<std::vector<real_t>> rho; // The rho for each jet_j (and each l)
+	
+	// The number of variates can be very large, so we obtain
+	// them in increments, and for each increment loop over jet_j.
+	// This minimizes the memory overhead.
+	// Additionally, since each increment/j-loop can be done separately, 
+	// we can launch a number of threads which accomplish many increments each.
+	static constexpr size_t numThreads_max = 4; // hard-coded for the time being
+	static constexpr size_t const minIncrements_perThread = 1; // 1 is fine, given a large enough increment size
+	
+	// Originally, threads shared a count, incrementing until kShared++ == n_increments.
+	// However, this leads to a non-deterministic result
+	// (given the same seed of NjetModel.gen)
+	// because we don't know how many increments each thread will 
+	// actually handle at runtime, and each thread uses its own PRNG. 
+	// If we require each thread to handle the same number of increments,
+	// then it will always call the PRNG the same number of times.
+	//~ kdp::MutexCount<size_t> kShared(0);
+				
+	ShapedJet const& jet_i = jetVec_sorted[i];
+	
+	size_t const n_requested = 
+		std::max(1lu, // Must have a sample size of at least 1
+			//~ (jet_i->p4.x0 < 1e3*jet_i->mass) ? 0 : 
+				size_t(jet_i.p4.x0 * jetShapeGranularity / Etot));
+	size_t const n_increments = kdp::MinPartitions(n_requested, ShapedJet::incrementSize);
+	size_t const numThreads = std::max(1lu, std::min(numThreads_max, 
+		n_increments / minIncrements_perThread));
+	size_t const n_increments_per_thread = kdp::MinPartitions(n_increments, numThreads);
+	
+	size_t const sampleSize = ShapedJet::incrementSize * 
+		n_increments_per_thread * numThreads;
+	
+	{
+		// Each thread accumulates a matrix rho_j_l for jet_i.
+		// We keep each jet_j separate because they each have there own normalization,
+		// and we would prefer to normalize as little as possible (less FLOPS).
+		//~ std::vector<std::vector<real_t>> rho_accumulate;
+		
+		// We need to use std::future for each thread's return value.
+		// Each thread will return a 2D matrix of floats.
+		std::vector<std::future<
+			std::vector<std::vector<real_t>>>> threadReturn;
+			
+		// Each thread should have it's own PRNG (for efficiency and determinism).
+		// Instead of trying to pass PRNG objects, pass the state string.
+		// We will jump the classes's main generator each time we spawn a new thread.
+		// This is slightly wasteful (we don't need a full Jump() of 2**512 calls), 
+		// but it's the simplest method that is totally deterministic.
+		// Since we can Jump() the generator 2**512 times, we can't over-jump.
+		std::vector<std::string> seedVec = gen.GetState_JumpVec(numThreads);
+		
+		// Create/launch all threads and bind their return value
+		for(size_t t = 0; t < numThreads; ++t)
+		{
+			// A few notes here:
+			// 1. member pointer must be &class::func not &(class::func)
+			// 	https://stackoverflow.com/questions/7134197/error-with-address-of-parenthesized-member-function
+			// 2. Any object which is to be passed by reference must use std::ref
+			threadReturn.push_back(
+				std::async(std::launch::async, &NjetModel::DoIncrements_jet_i,
+				i, lMax, 
+				std::cref(jetVec_sorted), 
+				//~ std::ref(kShared), 
+				n_increments_per_thread, 
+				std::cref(seedVec[t]), false)); // true = only self rho, but we want all
+		}
+		
+		for(size_t t = 0; t < numThreads; ++t)
+		{
+			// Get the result (get() will block until this tread's result is ready, 
+			// and get() can only be called once).
+			std::vector<std::vector<real_t>> rho_thread = threadReturn[t].get();
+			
+			// Initialize rho_accumulate to the first thread (steal its data).
+			if(t == 0) 
+				rho = std::move(rho_thread);
+			else
+			{
+				// For all other threads, loop over j, then l
+				for(size_t j = 0; j < rho.size(); ++j)
+					for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+						rho[j][lMinus1] += rho_thread[j][lMinus1];
+			}
+		}
+	}
+	
+	// Do jet_i's energy and sample-size normalization once (to reduce FLOPS and rounding error)
+	{
+		real_t const normalization = jet_i.p4.x0 / real_t(sampleSize);
+		
+		for(size_t j = 0; j <= i; ++j)
+			for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+				rho[j][lMinus1] *= normalization;
+	}
+	
+	return rho;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+std::vector<ShapedJet> NjetModel::SortBy_E(std::vector<ShapedJet> jetVec_unsorted)
+{
+	// First sort the incoming jetVec from high to low energy.
+	std::vector<ShapedJet> jetVec_sorted = jetVec_unsorted;
+	
+	// We can use lambdas (no-capture, empty square bracket) to use some standard tools with Jet class
+	std::sort(jetVec_sorted.begin(), jetVec_sorted.end(), 
+		[](ShapedJet const& lhs, ShapedJet const& rhs) {return lhs.p4.x0 > rhs.p4.x0;});
+		
+	return jetVec_sorted;
+}
+
+NjetModel::real_t NjetModel::Total_E(std::vector<ShapedJet> jetVec)
+{
+	// Add up energy from back to front (small to large)
+	return std::accumulate(jetVec.crbegin(), jetVec.crend(), real_t(0), 
+		// a lambda which sums jet energy for a std::accumulate
+		[](real_t const E_current, ShapedJet const& jet) {return E_current + jet.p4.x0;});
+}
+
+////////////////////////////////////////////////////////////////////////
 
 std::vector<NjetModel::real_t> NjetModel::H_l
 	(std::vector<ShapedJet> const& jetVec_unsorted, 
@@ -537,150 +680,38 @@ std::vector<NjetModel::real_t> NjetModel::H_l
 	 * number of FLOPS (because we need Order(n * lMax) FLOPS per cross-term, 
 	 * and there is one additional cross-term each time i increments).
 	*/ 
-	 
 	if(lMax > 0)
 	{
-		// First sort the incoming jetVec from high to low energy.
-		std::vector<ShapedJet> jetVec = jetVec_unsorted;
+		std::vector<ShapedJet> jetVec = SortBy_E(jetVec_unsorted);
+		real_t const Etot = Total_E(jetVec);
 		
-		// We can use lambdas (no-capture, empty square bracket) to use some standard tools with Jet class
-		std::sort(jetVec.begin(), jetVec.end(), 
-			[](ShapedJet const& lhs, ShapedJet const& rhs) {return lhs.p4.x0 > rhs.p4.x0;});
-		
-		// Add up energy from back to front (small to large)
-		real_t const Etot = std::accumulate(jetVec.crbegin(), jetVec.crend(), real_t(0), 
-			// a lambda which sums jet energy for a std::accumulate
-			[](real_t const E_current, ShapedJet const& jet) {return E_current + jet.p4.x0;});
-			
-		std::vector<std::vector<real_t>> rho; // The rho for each jet_j (and each l)
+		std::vector<std::vector<real_t>> rho_self; // The rho for each jet_j (and each l)
 				
 		// In the following outer loops, we will use i and j because it makes
 		// the code more readable. Being outer loops, the penalty is tiny.
 		for(size_t i = 0; i < jetVec.size(); ++i)
 		{
-			// The number of variates can be very large, so we obtain
-			// them in increments, and for each increment loop over jet_j.
-			// This minimizes the memory overhead.
-			// Additionally, since each increment/j-loop can be done separately, 
-			// we can launch a number of threads which accomplish many increments each.
-			size_t const numThreads = 4; // hard-coded for the time being
-			
-			// Originally, threads shared a count, incrementing until kShared++ == n_increments.
-			// However, this leads to a non-deterministic result
-			// (given the same seed of NjetModel.gen)
-			// because we don't know how many increments each thread will 
-			// actually handle at runtime, and each thread uses its own PRNG. 
-			// If we require each thread to handle the same number of increments,
-			// then it will always call the PRNG the same number of times.
-			//~ kdp::MutexCount<size_t> kShared(0);
-						
-			ShapedJet const& jet_i = jetVec[i];
-			
-			size_t const n_requested = 
-				std::max(1lu, // Must have a sample size of at least 1
-					//~ (jet_i->p4.x0 < 1e3*jet_i->mass) ? 0 : 
-						size_t(jet_i.p4.x0 * jetShapeGranularity / Etot));
-			size_t const n_increments_per_thread = kdp::MinPartitions(n_requested, 
-				ShapedJet::incrementSize * numThreads);
-			size_t const sampleSize = n_increments_per_thread * numThreads * ShapedJet::incrementSize;
-			
-			// Each thread accumulates a matrix rho_j_l for jet_i.
-			// We keep each jet_j separate because they each have there own normalization,
-			// and we would prefer to normalize as little as possible (less FLOPS).
-			std::vector<std::vector<real_t>> rho_accumulate;
-			
-			// We need to use std::future for each thread's return value.
-			// Each thread will return a 2D matrix of floats.
-			std::vector<std::future<
-				std::vector<std::vector<real_t>>>> threadReturn;
-				
-			// Each thread should have it's own PRNG (for efficiency and determinism).
-			// Instead of trying to pass PRNG objects, pass the state string.
-			// We will jump the classes's main generator each time we spawn a new thread.
-			// This is slightly wasteful (we don't need a full Jump() of 2**512 calls), 
-			// but it's the simplest method that is totally deterministic.
-			// Since we can Jump() the generator 2**512 times, we can't over-jump.
-			std::vector<std::string> seedVec = gen.GetState_JumpVec(numThreads);
-			
-			// Create/launch all threads and bind their return value
-			for(size_t t = 0; t < numThreads; ++t)
 			{
-				// A few notes here:
-				// 1. member pointer must be &class::func not &(class::func)
-				// 	https://stackoverflow.com/questions/7134197/error-with-address-of-parenthesized-member-function
-				// 2. Any object which is to be passed by reference must use std::ref
-				threadReturn.push_back(
-					std::async(std::launch::async, &NjetModel::DoIncrements_jet_i,
-					i, lMax, 
-					std::cref(jetVec), 
-					//~ std::ref(kShared), 
-					n_increments_per_thread, std::cref(seedVec[t])));
-			}
-			
-			for(size_t t = 0; t < numThreads; ++t)
-			{
-				// Get the result (get() will block until this tread's result is ready, 
-				// and get() can only be called once).
-				std::vector<std::vector<real_t>> rho_accumulate_thread = threadReturn[t].get();
-				
-				// Initialize rho_accumulate to the first thread (steal its data).
-				if(t == 0) 
-					rho_accumulate = std::move(rho_accumulate_thread);
-				else
-				{
-					// For all other threads, loop over j, then l
-					for(size_t j = 0; j < rho_accumulate.size(); ++j)
-					{
-						std::vector<real_t>& rho_accumulate_j = rho_accumulate[j];
-						std::vector<real_t> const& rho_accumulate_thread_j = rho_accumulate_thread[j];
-						
-						for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
-							rho_accumulate_j[lMinus1] += rho_accumulate_thread_j[lMinus1];
-					}
-				}
-			}
-			
-			// Do jet_i's energy and sample-size normalization once (to reduce FLOPS and rounding error)
-			{
-				real_t const normalization = jet_i.p4.x0 / real_t(sampleSize);
+				std::vector<std::vector<real_t>> rho_i_j_l = rho_j_l(i, lMax, 
+					jetShapeGranularity, Etot, jetVec, false); // false = do j = 0 through i
 				
 				for(size_t j = 0; j < i; ++j)
-				{
-					auto const& rho_j = rho[j];
-					auto& rho_accumulate_j = rho_accumulate[j];
-					
 					for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
-					{
 						H_l_vec[lMinus1] += real_t(2) * // two symmetric cross-terms
-							rho_j[lMinus1] * (normalization * rho_accumulate_j[lMinus1]);
-					}
-				}
+							rho_self[j][lMinus1] * rho_i_j_l[j][lMinus1];
 				
-				// Emplace the rho for jet_i (the self rho)
-				rho.emplace_back(rho_accumulate.back());
-				auto& rho_i = rho.back();
-				
-				// Do the normalization for each l as we add to H_l_vec
-				for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
-					H_l_vec[lMinus1] += (kdp::Squared(rho_i[lMinus1] *= normalization));
+				// Steal the rho for jet_i (the self rho)
+				rho_self.emplace_back(std::move(rho_i_j_l.back()));
 			}
-			
-			//~ if(i == 1)
-			//~ {
-				//~ std::ofstream file("rho_self.dat", std::ios::trunc);
-				//~ char buff[1024];
-								
-				//~ sprintf(buff, "# %.5e\n", jet_i.p4.x0/jet_i.mass);
-				//~ file << buff;
 				
-				//~ for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
-				//~ {
-					//~ sprintf(buff, "%lu  %.5e  %.5e\n", lMinus1 + 1, rho[0][lMinus1]/jetVec[0].p4.x0, rho[1][lMinus1]/jetVec[1].p4.x0);
-					//~ file << buff;
-				//~ }
-			//~ }
+			auto& rho_i = rho_self.back();
+			
+			// Add the self contribution; 
+			// We can't both steal rho_i_j_l.back() and place this operation in the other loop
+			for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+				H_l_vec[lMinus1] += (kdp::Squared(rho_i[lMinus1]));
 		}
-		
+			
 		// Do the energy normalization once (to reduce FLOPS and rounding error)
 		{
 			real_t const normalization = kdp::Squared(Etot);
@@ -689,9 +720,86 @@ std::vector<NjetModel::real_t> NjetModel::H_l
 				H_el /= normalization;
 		}
 	}
-		
-	return H_l_vec;
 	
+	return H_l_vec;
+}
+
+std::vector<typename NjetModel::real_t> NjetModel::H_l_jet_particle
+(std::vector<ShapedJet> const& jets_unoriented, 
+	std::vector<SpectralPower::PhatF> const& particles, 
+	size_t const lMax, real_t const jetShapeGranularity,
+	real_t const theta, real_t const phi)
+{
+	std::vector<ShapedJet> jets_labFrame = jets_unoriented; // copy all jet, so we can modify
+	
+	{
+		// Create the matrix which rotates the frame in which the jets were fit
+		// to the lab frame
+		kdp::Rot3 rotateToLab(kdp::Vec3(0., 0., 1.), 
+			kdp::Vec3(std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi), std::cos(theta)));
+			
+		for(auto& jet : jets_labFrame) // rotate all jets to the lab frame
+			rotateToLab(jet.p4.p());
+	}
+		
+	real_t const Etot = Total_E(jets_labFrame);
+	
+	// Number of particles probably O(100)
+	static constexpr size_t incrementSize = (size_t(1) << 5);	// 32
+	RecursiveLegendre<real_t, incrementSize> Pl_computer;
+	using array_t = decltype(Pl_computer)::incrementArray_t;
+	
+	std::vector<real_t> H_l_vec(lMax, real_t(0));	
+	
+	// Parallelize this only if it's slowing us down	
+	for(size_t i = 0; i < jets_labFrame.size(); ++i)
+	{
+		// rho_particles depends on the jet i. 
+		std::vector<real_t> rho_i_particle(lMax, real_t(0));
+		array_t rho_i_particles_increment;
+		
+		vec3_t const jet_i_hat = vec3_t(jets_labFrame[i].p4.p()).Normalize();
+		
+		for(size_t n = 0; n < particles.size(); n += incrementSize)
+		{
+			{
+				size_t k = 0;
+				for(; k < std::min(incrementSize, particles.size() - n); ++k)
+				{
+					Pl_computer.z[k] = jet_i_hat.Dot(particles[n*incrementSize + k].pHat);
+					rho_i_particles_increment[k] = particles[n*incrementSize + k].f;
+				}
+					
+				// Zero fill the last increment
+				for(; k < incrementSize; ++k)
+					rho_i_particles_increment[k] = Pl_computer.z[k] = real_t(0);
+			}
+					
+			Pl_computer.Reset();
+				
+			for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+			{
+				array_t const& Pl_z = Pl_computer.Next();
+				
+				for(size_t k = 0; k < incrementSize; ++k)
+					rho_i_particles_increment[k] *= Pl_z[k];
+					
+				rho_i_particle[lMinus1] += kdp::BinaryAccumulate(rho_i_particles_increment);
+			}
+		}
+		
+		std::vector<real_t> rho_i = // Get the rho_self for the jet 
+			rho_j_l(i, lMax, 
+			jetShapeGranularity, Etot, 
+			jets_labFrame, true) // true = only do self rho
+				.front(); // so there is only one element in the returned vector
+		
+		for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+			H_l_vec[lMinus1] += rho_i[lMinus1] * rho_i_particle[lMinus1];
+	}
+	
+	return H_l_vec;
+}
 	// Original, particle Monte Carlo
 	
 	//~ std::vector<vec4_t> particles;
@@ -746,7 +854,6 @@ std::vector<NjetModel::real_t> NjetModel::H_l
 		//~ t.emplace_back(part.p()/part.x0, part.x0/total.x0, false);
 		
 	//~ return computer(t, lMax); // Return the spectral power
-}
 	
 /*
 

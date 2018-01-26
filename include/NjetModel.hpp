@@ -7,6 +7,7 @@
 //~ #include "ArrogantDetector.hpp"
 #include <vector>
 #include <memory> // ShowerParticle
+#include "fastjet/PseudoJet.hh"
 
 //======================================================================
 
@@ -53,6 +54,8 @@ struct Jet
 	// The interface we expect to use from inside a Cython loop
 	explicit Jet(real_t const x1, real_t const x2, real_t const x3, 
 		real_t const w0, kdp::Vec4from2 const w0type);
+		
+	Jet(fastjet::PseudoJet const& pj);
 };
 
 /*! @brief A 4-momenta with a shape (defined in its CM frame and boosted into the lab frame).
@@ -383,12 +386,22 @@ class NjetModel
 		mutable pqRand::engine gen;
 		
 		//! @brief Do the work in the i-loop of H_l
-		static std::vector<std::vector<real_t>> DoIncrements_jet_i
-			(size_t const i, size_t const lMax,
+		static std::vector<std::vector<real_t>> DoIncrements_jet_i(
+			size_t const i, size_t const lMax,
 			std::vector<ShapedJet> const& jetVec,
 			//~ kdp::MutexCount<size_t>& kShared, 
 			size_t const numIncrements,
-			std::string const& generator_seed);
+			std::string const& generator_seed, 
+			bool const onlySelf);
+			
+		std::vector<std::vector<real_t>> rho_j_l(
+			size_t const i, size_t const lMax,
+			real_t const jetShapeGranularity, real_t const Etot,
+			std::vector<ShapedJet> const& jetVec_sorted,
+			bool const onlySelf) const;
+			
+		static std::vector<ShapedJet> SortBy_E(std::vector<ShapedJet>);
+		static real_t Total_E(std::vector<ShapedJet>);
 		
 	public:
 		NjetModel(QSettings const& settings);
@@ -404,6 +417,14 @@ class NjetModel
 		*/ 
 		std::vector<real_t> H_l(std::vector<ShapedJet> const& jetVec_unsorted, 
 			size_t const lMax, real_t const jetShapeGranularity) const;
+		
+		// The power spectrum from multiplying rho_jets * rho_particles	
+		std::vector<real_t> H_l_jet_particle(std::vector<ShapedJet> const& jets_unoriented, 
+			std::vector<SpectralPower::PhatF> const& particles, 
+			size_t const lMax, real_t const jetShapeGranularity,
+			real_t const theta, real_t const phi);
+			
+		static std::pair<real_t, real_t> CosSin(vec3_t const&, vec3_t const&);
 					
 		//~ static std::vector<vec4_t> GetJets(std::vector<real_t> const& jetParams);
 		//~ static std::vector<std::vector<real_t>> GetJetsPy(std::vector<real_t> const& jetParams);

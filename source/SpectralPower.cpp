@@ -182,15 +182,11 @@ std::vector<SpectralPower::real_t> SpectralPower::operator()
 		H_l_vec = H_l_threadedIncrement();
 	else
 	{
-		// We add H_l_vec from multiple threads, so initialize to zero
-		// H_l_vec[0] => l=1, so size is lMax.
-		H_l_vec.assign(settings.lMax, 0.);
-		
 		// We need to use std::future for each thread's return value
 		std::vector<std::future<std::vector<real_t>>> threadReturn;
 		
 		// Create/launch all threads and bind their return value
-		for(size_t i = 0; i < numThreads; ++i)
+		for(size_t t = 0; t < numThreads; ++t)
 		{
 			// Note, member pointer must be &class::func not &(class::func)
 			// https://stackoverflow.com/questions/7134197/error-with-address-of-parenthesized-member-function
@@ -198,15 +194,21 @@ std::vector<SpectralPower::real_t> SpectralPower::operator()
 				std::async(std::launch::async, &SpectralPower::H_l_threadedIncrement, this));
 		}
 	
-		for(auto& ret : threadReturn)
+		for(size_t t = 0; t < numThreads; ++t)
 		{
 			// Get the result (get() will block until the result is ready)
-			std::vector<real_t> const& H_l_vec_thread = ret.get();
+			// The return is an r-value, so we obtain it by value
+			std::vector<real_t> H_l_vec_thread = threadReturn[t].get();
 			
-			// Go through each H_l returned and add it to the running sum.
-			// The number of threads is limited, so there's no point in a binary sum.
-			for(size_t lMinus1 = 0; lMinus1 < settings.lMax; ++lMinus1)
-				H_l_vec[lMinus1] += H_l_vec_thread[lMinus1];
+			if(t == 0) // Intialize to first increment by stealing thread's data
+				H_l_vec = std::move(H_l_vec_thread);
+			else
+			{
+				// Go through each H_l returned and add it to the running sum.
+				// The number of threads is limited, so there's no point in a binary sum.
+				for(size_t lMinus1 = 0; lMinus1 < settings.lMax; ++lMinus1)
+					H_l_vec[lMinus1] += H_l_vec_thread[lMinus1];
+			}
 		}
 	}
 		

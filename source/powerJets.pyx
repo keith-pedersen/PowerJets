@@ -51,7 +51,11 @@ include "kdp/kdpVectors.hpy"
 
 # To allow the objects to have the same name in Cython and C++,
 # we import as **_c, giving the full C++ name in quotes
-cdef extern from "NjetModel.hpp":	
+cdef extern from "NjetModel.hpp":
+	cdef cppclass Jet:
+		Vec4_c p4
+		double mass
+		
 	cdef cppclass ShapedJet:
 		Vec4_c p4
 		double mass
@@ -75,6 +79,32 @@ cdef extern from "NjetModel.hpp":
 		NjetModel_c(const string& iniFileName) except +
 		
 		vector[double] H_l(vector[ShapedJet]& const, size_t const, double const) except +
+		
+cdef extern from "SpectralPower.hpp":
+	cdef cppclass PhatF "SpectralPower:PhatF":
+		pass	
+		
+cdef extern from "LHE_Pythia_PowerJets.hpp":
+	cdef cppclass Status "LHE_Pythia_PowerJets::Status":
+		pass
+		
+	cdef Status Status_OK "LHE_Pythia_PowerJets::Status::OK"
+	cdef Status Status_UNINIT "LHE_Pythia_PowerJets::Status::UNINIT"
+	cdef Status Status_END_OF_FILE "LHE_Pythia_PowerJets::Status::END_OF_FILE"
+	cdef Status Status_EVENT_MAX "LHE_Pythia_PowerJets::Status::EVENT_MAX"
+	cdef Status Status_ABORT_MAX "LHE_Pythia_PowerJets::Status::ABORT_MAX"
+			
+	cdef cppclass LHE_Pythia_PowerJets:
+		LHE_Pythia_PowerJets(const string&) except +
+		
+		size_t EventIndex()		
+		Status GetStatus()
+		
+		const vector[PhatF]& GetDetected()		
+		const vector[double]& Get_H_det()		
+		const vector[Jet]& Get_FastJets()
+		
+		Status Next()
 			
 ########################################################################		
 # Now we make the Cython wrapper class of the C++ object
