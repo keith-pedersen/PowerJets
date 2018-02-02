@@ -5,6 +5,7 @@ void LHE_Pythia_PowerJets::ClearCache()
 	detected.clear();
 	H_det.clear();
 	fast_jets.clear();
+	ME_vec.clear();
 }
 
 LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(std::string const& ini_filePath):
@@ -187,6 +188,20 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 		detected.insert(detected.end(), 
 			detector->Towers().cbegin(), detector->Towers().cend());
 		
+		// Transfer pythia to jets	
+		{
+			auto const finalState_ME = detector->ME();
+			
+			real_t Etot = 0.;
+			
+			for(auto const& particle : finalState_ME)
+				Etot += particle.e();
+				
+			for(auto const& particle : finalState_ME)
+				ME_vec.emplace_back(particle.px()/Etot, particle.py()/Etot, particle.pz()/Etot,
+					particle.m()/Etot, kdp::Vec4from2::Mass);
+		}
+		
 		{
 			// Fill the particle into a format useful by fastjet
 			std::vector<fastjet::PseudoJet> protojets;
@@ -195,8 +210,8 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 				{
 					vec3_t const p3_scaled = (particle.pHat * particle.f);
 					
-					// mass goes last (wtf?!)
-					protojets.emplace_back(p3_scaled.x1, p3_scaled.x2, p3_scaled.x3, p3_scaled.Mag());
+					// energy goes last (wtf?!)
+					protojets.emplace_back(p3_scaled.x1, p3_scaled.x2, p3_scaled.x3, particle.f);
 				}
 			}
 			

@@ -52,6 +52,7 @@ class LHE_Pythia_PowerJets
 		std::vector<PhatF> detected; // The final state particles
 		std::vector<real_t> H_det; // The power spectrum for detected particles
 		std::vector<Jet> fast_jets; // Jest clustered from particle_cache using Fastjet
+		std::vector<Jet> ME_vec;
 		
 		/*! @brief A place to redirect the FastJet banner.
 		 * 
@@ -74,11 +75,13 @@ class LHE_Pythia_PowerJets
 		
 		Status GetStatus() {return status;}
 		
-		std::vector<PhatF> const& GetDetected() {return detected;}
+		std::vector<PhatF> const& Get_Detected() {return detected;}
 		
 		std::vector<real_t> const& Get_H_det() {return H_det;} 
 		
 		std::vector<Jet> const& Get_FastJets() {return fast_jets;}
+		
+		std::vector<Jet> const& Get_ME() {return ME_vec;}
 		
 		Status Next() {return Next_internal(false);}
 

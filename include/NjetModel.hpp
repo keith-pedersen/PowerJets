@@ -56,6 +56,18 @@ struct Jet
 		real_t const w0, kdp::Vec4from2 const w0type);
 		
 	Jet(fastjet::PseudoJet const& pj);
+	
+	//! @brief Rotate the z-axis to (sin(theta) cos(phi), sin(theta) sin(phi), cos(phi))
+	template <class T>
+	static void Rotate(std::vector<T>& jetVec, real_t const theta, real_t const phi, real_t const omega)
+	{
+		kdp::Rot3 rotator(kdp::Vec3(0., 0., 1.), 
+			kdp::Vec3(std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi), std::cos(theta)),
+			omega);
+			
+		for(auto& jet : jetVec)
+			rotator(jet.p4.p());
+	}
 };
 
 /*! @brief A 4-momenta with a shape (defined in its CM frame and boosted into the lab frame).
@@ -67,6 +79,10 @@ struct Jet
 class ShapedJet : public Jet
 {
 	public:
+		//! @brief The address of the jet in the splitting tree.
+		std::vector<bool> address;
+		using Jet::Rotate;
+	
 		//! @brief Random samples from the jet shape are generated in increments of this size
 		static constexpr size_t incrementSize = size_t(1) << 8; // 512, not too large, not too small
 		using incrementArray_t = std::array<real_t, incrementSize>;
@@ -100,18 +116,31 @@ class ShapedJet : public Jet
 		// The don't initialize constructor
 		explicit ShapedJet(bool): Jet(false) {}
 		
-		ShapedJet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type, 
+		ShapedJet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type,
+			std::vector<bool> address_in = std::vector<bool>(),
 			std::vector<real_t> const& shapeParams = {}):
-			Jet(p3_in, w0, w0type) {}
+			Jet(p3_in, w0, w0type),
+			address(std::move(address_in)) {}
 				
 		// The interface we expect to use from inside a Cython loop
 		ShapedJet(real_t const x1, real_t const x2, real_t const x3, 
-			real_t const w0, kdp::Vec4from2 const w0type, std::vector<real_t> const& shapeParams = {}):
-		Jet(x1, x2, x3, w0, w0type) {}
+			real_t const w0, kdp::Vec4from2 const w0type, 
+			std::vector<bool> address_in = std::vector<bool>(),
+			std::vector<real_t> const& shapeParams = {}):
+		Jet(x1, x2, x3, w0, w0type),
+		address(std::move(address_in)) {}
 		
 		// We assume that the shape of the jet will be initialized later, 
 		// after the jet's 4-vector and mass have been defined.
 		void SetShape(param_iter_t const shapeParam_begin, param_iter_t const shapeParam_end);
+		
+		// cython does not support
+		//~ static bool Sort_by_Mass(ShapedJet const& left, ShapedJet const& right)
+		//~ {
+			//~ return left.mass > right.mass;
+		//~ }
+		
+		bool operator < (ShapedJet const& that) const;
 };
 
 // This class is a C++ implementation of particleJet_mk3.py
@@ -208,7 +237,8 @@ class ShowerParticle : public ShapedJet
 				
 		//! @brief A ShowerParticle by its \ref mother when she is instructed to Split().
 		ShowerParticle(ShowerParticle* mother_in, 
-			vec3_t const& p3_in, real_t const mass_in, vec3_t const& pol_in);
+			vec3_t const& p3_in, real_t const mass_in, vec3_t const& pol_in, 
+			std::vector<bool>&& address_in);
 		
 		/*! @brief Split this particle using the splitting parameters in the range [begin, end).
 		 *  
@@ -227,6 +257,8 @@ class ShowerParticle : public ShapedJet
 		*/ 
 		void MakeDaughters(vec3_t const& p3_b, 
 			real_t const u_b, real_t const uSum, vec3_t const& newPol);
+			
+		std::vector<bool> DaughterAddress(bool const which) const;
 		
 		/*! @brief Recursively append, to the existing vector,
 		 *  copies of any final-state jets from this particle or its descendants.
@@ -381,6 +413,22 @@ class NjetModel
 		using vec4_t = Jet::vec4_t;
 		using real_t = SpectralPower::real_t;
 		//~ typedef SpectralPower::PhatF PhatF;
+		
+		class JetParticle_Cache
+		{
+			friend class NjetModel;
+			
+			std::vector<ShapedJet> jetVec;
+			std::vector<std::vector<real_t>> rho_jet;				
+			
+			JetParticle_Cache(NjetModel const& modeler,
+				std::vector<ShapedJet> const& jetVec_in,
+				size_t const lMax, real_t const jetShapeGranularity);
+				
+			public:
+				JetParticle_Cache() {} //! @brief a public nullary ctor for Cython
+				size_t lMax() const {return rho_jet.front().size();}
+		};
 	
 	private:
 		mutable pqRand::engine gen;
@@ -405,9 +453,12 @@ class NjetModel
 		
 	public:
 		NjetModel(QSettings const& settings);
-		NjetModel(std::string const& iniFileName);
+		NjetModel(std::string const& iniFileName = "NjetModel.conf");
 		NjetModel();
 		~NjetModel();
+		
+		JetParticle_Cache Make_JetParticle_Cache(std::vector<ShapedJet> const& jetVec,
+				size_t const lMax, real_t const jetShapeGranularity) const;
 		
 		/*! @brief Given a vector of jets (in random order), 
 		 *  return H_l from (l = 1) to (l = lMax).
@@ -419,10 +470,9 @@ class NjetModel
 			size_t const lMax, real_t const jetShapeGranularity) const;
 		
 		// The power spectrum from multiplying rho_jets * rho_particles	
-		std::vector<real_t> H_l_jet_particle(std::vector<ShapedJet> const& jets_unoriented, 
+		std::vector<real_t> H_l_JetParticle(JetParticle_Cache const& cache, 
 			std::vector<SpectralPower::PhatF> const& particles, 
-			size_t const lMax, real_t const jetShapeGranularity,
-			real_t const theta, real_t const phi);
+			real_t const theta, real_t const phi, real_t const omega) const;
 			
 		static std::pair<real_t, real_t> CosSin(vec3_t const&, vec3_t const&);
 					

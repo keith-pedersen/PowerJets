@@ -29,7 +29,7 @@ setup(
     Extension('powerJets',
               sources=['source/powerJets.pyx'],
               include_dirs = ['include/', '/home/keith/local/include/'],
-              libraries = ['kdp', 'pJets', 'pqr', 'pythia8', 'QtCore'],
+              libraries = ['kdp', 'pJets', 'pqr', 'pythia8', 'QtCore', 'fastjet'],
               library_dirs = ['/home/keith/local/lib/'],
               extra_compile_args=['-g', '-std=c++11', '-msse4', '-mavx2', '-mfpmath=sse', '-mieee-fp', '-march=native', '-ftree-vectorize'], # -O2 is default
               language='c++')
