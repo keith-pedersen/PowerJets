@@ -384,24 +384,24 @@ bool ShowerParticle::isShowerInexact()
 
 ////////////////////////////////////////////////////////////////////////
 
-ShowerParticle& ShowerParticle::LocateParticle(std::vector<bool> const& address)
+ShowerParticle& ShowerParticle::LocateParticle(std::vector<bool> const& theAddress)
 {
 	// Starting here, navigate down until we locate address
 	ShowerParticle* currentNode = this;
 	// The level is the index of the current bool
 	size_t level = 0; // Slower than an iterator, but more readible. This function is not what takes the time.
 	
-	while(level < address.size())
+	while(level < theAddress.size())
 	{
 		// If currentNode is a leaf, we can't derefence b or c; this address makes no sense.
 		if(currentNode->isLeaf())
-			throw NoSuchAddress(address, level);
+			throw NoSuchAddress(theAddress, level);
 		else
-			currentNode = address[level++] ? currentNode->c : currentNode->b;
+			currentNode = theAddress[level++] ? currentNode->c : currentNode->b;
 			//~ currentNode = address[level++] ? currentNode->c.get() : currentNode->b.get();
 			// Since we are not going to delete currentNode, it is same to use pointers directly
 	}
-	assert(currentNode->address == address);
+	assert(currentNode->address == theAddress);
 	
 	return *currentNode;
 }
@@ -645,7 +645,7 @@ std::vector<std::vector<NjetModel::real_t>> NjetModel::rho_j_l(
 				std::cref(jetVec_sorted), 
 				//~ std::ref(kShared), 
 				n_increments_per_thread, 
-				std::cref(seedVec[t]), false)); // true = only self rho, but we want all
+				std::cref(seedVec[t]), onlySelf)); // true = only self rho, but we want all
 		}
 		
 		for(size_t t = 0; t < numThreads; ++t)
@@ -673,7 +673,7 @@ std::vector<std::vector<NjetModel::real_t>> NjetModel::rho_j_l(
 		// (i.e. so it actually returns what it claims to calculate).
 		real_t const normalization = jet_i.p4.x0 / (real_t(sampleSize) * Etot);
 		
-		for(size_t j = 0; j <= i; ++j)
+		for(size_t j = 0; j < rho.size(); ++j)
 		{
 			for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
 			{

@@ -51,7 +51,7 @@ class ArrogantDetector
 		typedef uint32_t towerID_t;
 		typedef typename kdp::Vector3<double> vec3_t; //!< @brief The 3-vector type
 		typedef typename kdp::Vector4<double> vec4_t; //!< @brief The 4-vector type		
-		typedef typename SpectralPower::PhatF PhatF; //!< @brief The struct for pHat and f
+		//~ typedef typename SpectralPower::PhatF PhatF; //!< @brief The struct for pHat and f
 	
 		//! @brief The main ArrogantDetector settings, read from a parsed INI file.
 		struct Settings
@@ -178,7 +178,7 @@ class ArrogantDetector
 		
 		// The particles for the last detected event (filled by operator())
 		std::vector<Pythia8::Particle> me; // matrix element, read from Pythia file
-		std::vector<PhatF> finalState, // all final state particles
+		std::vector<vec3_t> finalState, // all final state particles
 			tracks, towers; // visible particles
 		
 		// Running sums while filling the detector
@@ -210,13 +210,16 @@ class ArrogantDetector
 		inline std::vector<Pythia8::Particle> const& ME() const {return me;}
 		
 		//! @brief Get the final state particles (including neutrinos).
-		inline std::vector<PhatF> const& FinalState() const {return finalState;}
+		inline std::vector<vec3_t> const& FinalState() const {return finalState;}
 		
 		//! @brief Get all charged particles passing eta and pT cuts.
-		inline std::vector<PhatF>const& Tracks() const {return tracks;}
+		inline std::vector<vec3_t>const& Tracks() const {return tracks;}
 		
 		//! @brief Get towers from the calorimeter, with missing energy at the back.
-		inline std::vector<PhatF> const& Towers() const {return towers;}
+		inline std::vector<vec3_t> const& Towers() const {return towers;}
+		
+		//! @brief Return the location of every tower, weighted by their dOmega / (4 pi)
+		std::vector<vec3_t> GetTowerArea() const;
 		
 		inline Settings const& GetSettings() const {return settings;}
 		

@@ -90,7 +90,8 @@ class SpectralPower
 			PhatF(Pythia8::Particle const& particle):
 				PhatF(particle.px(), particle.py(), particle.pz(), particle.e(), true) {}
 				
-			static std::vector<PhatF> PythiaToPhatF(std::vector<Pythia8::Particle> const& original);
+			static std::vector<PhatF> To_PhatF_Vec(std::vector<Pythia8::Particle> const& original);
+			static std::vector<PhatF> To_PhatF_Vec(std::vector<vec3_t> const& original);
 		};
 
 		// 
@@ -244,6 +245,8 @@ class SpectralPower
 		
 		SpectralPower(QSettings const& parsedSettings):
 			settings(parsedSettings) {}
+		SpectralPower(std::string const& iniPath):
+			SpectralPower(QSettings(iniPath.c_str(), QSettings::IniFormat)) {}
 		
 		Settings const& GetSettings() {return settings;}
 		Settings const& UpdateSettings(QSettings const& parsedSettings);
@@ -262,6 +265,13 @@ class SpectralPower
 			size_t const lMax, 
 			size_t const numThreads_requested = 0); // If zero, defer to internal settings
 			
+		std::vector<real_t> operator()(std::vector<vec3_t> const& particles,
+			size_t const lMax, 
+			size_t const numThreads_requested = 0); // If zero, defer to internal settings
+			
+		void Write_Hl_toFile(std::string const& filePath,
+			std::vector<vec3_t> const& particles,
+			size_t const lMax, size_t const numThreads_requested = 0);			
 		/* 
 		 * 
 		 * Producer-consumer model (first back up working single thread model)

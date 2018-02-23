@@ -3,6 +3,7 @@
 void LHE_Pythia_PowerJets::ClearCache()
 {
 	detected.clear();
+	detected_PhatF.clear();
 	H_det.clear();
 	fast_jets.clear();
 	ME_vec.clear();
@@ -12,7 +13,7 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(std::string const& ini_filePath):
 	// Because of chained defalt arguments, to send a false for printBanner, 
 	// we have to send the default value for xmlDir.
 	pythia("../xmldoc", false),
-	parsedINI(ini_filePath.c_str(), QSettings::NativeFormat),
+	parsedINI(ini_filePath.c_str(), QSettings::IniFormat),
 		// Note: Must pass NativeFormat, otherwise it doesn't work.
 	detector(ArrogantDetector::NewDetector(parsedINI, "detector")),
 		// The detector's parameters are read from the INI folder [detector]
@@ -187,6 +188,8 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 		detected = detector->Tracks();
 		detected.insert(detected.end(), 
 			detector->Towers().cbegin(), detector->Towers().cend());
+			
+		detected_PhatF = PhatF::To_PhatF_Vec(detected);
 		
 		// Transfer pythia to jets	
 		{
@@ -206,12 +209,10 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 			// Fill the particle into a format useful by fastjet
 			std::vector<fastjet::PseudoJet> protojets;
 			{
-				for(PhatF const& particle : detected)
+				for(vec3_t const& particle : detected)
 				{
-					vec3_t const p3_scaled = (particle.pHat * particle.f);
-					
 					// energy goes last (wtf?!)
-					protojets.emplace_back(p3_scaled.x1, p3_scaled.x2, p3_scaled.x3, particle.f);
+					protojets.emplace_back(particle.x1, particle.x2, particle.x3, particle.Mag());
 				}
 			}
 			
@@ -226,7 +227,7 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 		
 		//~ H_ME = Hcomputer(finalState_ME, lMax);
 		//~ H_showered = Hcomputer(detector.FinalState(), lMax);
-		H_det = Hcomputer(detected, lMax);
+		H_det = Hcomputer(detected_PhatF, lMax);
 	}
 	
 	return status;

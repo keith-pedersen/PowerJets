@@ -8,7 +8,7 @@
 ////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
-std::vector<SpectralPower::PhatF> SpectralPower::PhatF::PythiaToPhatF
+std::vector<SpectralPower::PhatF> SpectralPower::PhatF::To_PhatF_Vec
 	(std::vector<Pythia8::Particle> const& original)
 {
 	double totalE = 0.;
@@ -25,6 +25,27 @@ std::vector<SpectralPower::PhatF> SpectralPower::PhatF::PythiaToPhatF
 		pHatF.f /= totalE;
 		
 	return newVec;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+std::vector<SpectralPower::PhatF> SpectralPower::PhatF::To_PhatF_Vec
+	(std::vector<vec3_t> const& originalVec)
+{
+	std::vector<PhatF> convertedVec;
+	
+	real_t totalE = real_t(0);
+	for(auto const& original : originalVec)
+	{
+		real_t const mag = original.Mag();
+		totalE += mag;
+		convertedVec.emplace_back(original, mag, true);
+	}
+	
+	for(auto& converted : convertedVec)
+		converted.f /= totalE;
+		
+	return convertedVec;
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -238,6 +259,55 @@ std::vector<SpectralPower::real_t> SpectralPower::operator()
 	}
 	
 	return H_l_vec;
+}
+
+std::vector<SpectralPower::real_t> SpectralPower::operator()
+	(std::vector<vec3_t> const& particles, size_t const lMax, 
+	size_t const numThreads_requested)
+{
+	//~ PhatFvec converted;
+	
+	//~ std::vector<real_t> magVec;
+	//~ magVec.reserve(particles.size());
+	
+	//~ real_t totalE = real_t(0);
+	//~ for(auto const& particle : particles)
+	//~ {
+		//~ real_t const mag = particle.Mag();
+		//~ magVec.push_back(mag);
+		//~ totalE += mag;
+	//~ }
+	
+	//~ for(size_t i = 0; i < particles.size(); ++i)
+		//~ converted.emplace_back(particles[i] / magVec[i], magVec[i] / totalE, false);
+	
+	return (*this)(PhatF::To_PhatF_Vec(particles), lMax, numThreads_requested);
+}
+
+void SpectralPower::Write_Hl_toFile(std::string const& filePath,
+	std::vector<vec3_t> const& particles, 
+	size_t const lMax, size_t const numThreads_requested)
+{
+	std::ofstream file(filePath, std::ios::trunc);
+	
+	auto constexpr formatString = "%4lu %.16e\n";
+	
+	if(not file.is_open())
+		throw std::ios::failure("File cannot be opened for write: " + filePath);
+	{
+		auto const H = (*this)(particles, lMax, numThreads_requested);
+		
+		char buff[1024];
+		
+		sprintf(buff, formatString, 0lu, 1.);
+		file << buff;
+		
+		for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+		{
+			sprintf(buff, formatString, lMinus1 + 1, H[lMinus1]);
+			file << buff;
+		}
+	}	
 }
 
 ////////////////////////////////////////////////////////////////////////

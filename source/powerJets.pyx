@@ -126,7 +126,8 @@ cdef extern from "LHE_Pythia_PowerJets.hpp":
 		size_t EventIndex()		
 		Status GetStatus()
 		
-		const vector[PhatF]& Get_Detected()		
+		const vector[Vec3_c]& Get_Detected()	
+		const vector[PhatF]& Get_Detected_PhatF()
 		const vector[double]& Get_H_det()		
 		const vector[Jet]& Get_FastJets()
 		const vector[Jet]& Get_ME()
@@ -429,6 +430,7 @@ cdef class _PowerJetFitter:
 		const double pileupFrac = 0., const bool relative = False):
 		
 		H_l_fit = StdVecToNumpy(self.c_model.H_l_JetParticle(self.cache, 
-			self.c_pythia.Get_Detected(), angleParams[0], angleParams[1], angleParams[2]))*(1. - pileupFrac)**2
+			self.c_pythia.Get_Detected_PhatF(), 
+			angleParams[0], angleParams[1], angleParams[2]))*(1. - pileupFrac)**2
 		
 		return _PowerJetFitter._H_l_error_vec(H_l_fit, H_obs, relative)

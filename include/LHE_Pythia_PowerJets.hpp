@@ -28,7 +28,7 @@ class LHE_Pythia_PowerJets
 		
 		enum class Status {OK, UNINIT, END_OF_FILE, EVENT_MAX, ABORT_MAX};
 		
-		static constexpr char* ini_filePath_default = "PowerJets.conf";
+		static constexpr char* const ini_filePath_default = "PowerJets.conf";
 		
 	private:
 		Pythia8::Pythia pythia; //! @brief The Pythia instance
@@ -49,7 +49,8 @@ class LHE_Pythia_PowerJets
 		Status status;
 		
 		// For now, we only cache the pieces we need
-		std::vector<PhatF> detected; // The final state particles
+		std::vector<vec3_t> detected; // The final state particles
+		std::vector<PhatF> detected_PhatF; // The final state particles
 		std::vector<real_t> H_det; // The power spectrum for detected particles
 		std::vector<Jet> fast_jets; // Jest clustered from particle_cache using Fastjet
 		std::vector<Jet> ME_vec;
@@ -75,7 +76,9 @@ class LHE_Pythia_PowerJets
 		
 		Status GetStatus() {return status;}
 		
-		std::vector<PhatF> const& Get_Detected() {return detected;}
+		std::vector<vec3_t> const& Get_Detected() {return detected;}
+		
+		std::vector<PhatF> const& Get_Detected_PhatF() {return detected_PhatF;}
 		
 		std::vector<real_t> const& Get_H_det() {return H_det;} 
 		
