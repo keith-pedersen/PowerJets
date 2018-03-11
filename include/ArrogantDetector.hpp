@@ -206,6 +206,8 @@ class ArrogantDetector
 		settings(parsedINI, detectorName), clearME(true) {}
 		virtual ~ArrogantDetector() {}
 		
+		void Clear();
+		
 		//! @brief Get the matrix element.
 		inline std::vector<Pythia8::Particle> const& ME() const {return me;}
 		

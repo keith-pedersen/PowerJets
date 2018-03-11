@@ -53,6 +53,9 @@ void ArrogantDetector::Init_inDerivedCTOR()
 {
 	polarMax = AbsPolarAngle(vec3_t(0., 0., 1.));
 	polarMax_cal = kdp::RoundToNearestPitch(AbsPolarAngle(EtaToVec(settings.etaMax_cal)), settings.squareWidth);
+	if(polarMax_cal == polarMax)
+		polarMax_cal -= settings.squareWidth; // Make sure there is a beam hole.
+		
 	polarMax_track = kdp::RoundToNearestPitch(AbsPolarAngle(EtaToVec(settings.etaMax_track)), settings.squareWidth);
 
 	tooBigID = towerID_t(std::round(polarMax_cal / settings.squareWidth)) * settings.numPhiBins_centralBand;
@@ -95,22 +98,24 @@ std::vector<ArrogantDetector::vec3_t> ArrogantDetector::GetTowerArea() const
 {
 	std::vector<vec3_t> towerVec;
 	
-	/* dOmega = \int sin(theta) dTheta dPhi = deltaPhi * (cos(t2) - cos(t1))
-	 * = deltaPhi * 2 sin(0.5(t1 + t2)) * sin(0.5(t2 - t1)) 
-	 * 2 deltaPhi / (4 pi) = deltaPhi / (2 pi) = (2 pi)/numPhiBins / (2 pi)
+	/* REMEMBER: we are using a different polar angle: th = 0 --> equator, so cos(theta) is the 
+	 * dOmega = \int cos(theta) dTheta dPhi = deltaPhi * (sin(t2) - sin(t1))
+	 * 	= 2*sin((th2 - th1)/2)*cos((th1 + th2)/2)*dPhi
+	 * 2 dPhi / (4 pi) = dPhi / (2 pi) = (2 pi)/numPhiBins / (2 pi) = 1./numPhiBins    so ....
+	 * dOmega / (4 pi) = sin((th2 - th1)/2)*cos((th1 + th2)/2) / numPhiBins
 	*/	
 	towerID_t const polarIndex_end = towerID_t(std::round(polarMax_cal / settings.squareWidth));
 		
 	for(towerID_t polarIndex = 0; polarIndex < polarIndex_end; ++polarIndex)
 	{
 		towerID_t const numPhiBins = towerID_t(std::round((2.*M_PI) / PhiWidth(polarIndex)));
-		
+				
 		// NO shortcuts; theta and polarAngle do not neccesarily map linearly
 		double const theta1 = ToAbsTheta(polarIndex * settings.squareWidth);
-		double const theta2 = ToAbsTheta(polarIndex * settings.squareWidth);
+		double const theta2 = ToAbsTheta((polarIndex + 1) * settings.squareWidth);
 		
 		double const dOmegaNorm = 
-			std::sin(0.5*(theta1 + theta2))*std::sin(0.5*(theta2 - theta1)) / double(numPhiBins);
+			std::sin(0.5*(theta2 - theta1))*std::cos(0.5*(theta1 + theta2)) / double(numPhiBins);
 		
 		// This is an inefficient way to get the tower center; however, it is the most readible.
 		// And we don't expect this function to get called very often
@@ -118,6 +123,8 @@ std::vector<ArrogantDetector::vec3_t> ArrogantDetector::GetTowerArea() const
 		{
 			towerID_t towerIndex = polarIndex * settings.numPhiBins_centralBand + phiIndex;
 			towerVec.push_back(GetTowerCenter(towerIndex) * dOmegaNorm);
+			towerVec.push_back(towerVec.back());
+			towerVec.back().x3 = -towerVec.back().x3;
 		}
 	}
 	
@@ -157,13 +164,20 @@ void ArrogantDetector::operator()(Pythia8::Pythia& theEvent,
 	(*this)(neutralVec, chargedVec, invisibleVec, pileupVec); // Do the actual detection
 }
 
+void ArrogantDetector::Clear()
+{
+	finalState.clear(); 
+	tracks.clear();	
+	towers.clear();
+}
+
 void ArrogantDetector::operator()(std::vector<vec4_t> const& neutralVec,
 	std::vector<vec4_t> const& chargedVec, std::vector<vec4_t> const& invisibleVec,
 	std::vector<vec4_t> const& pileupVec)
 {
-	foreCal.clear(); backCal.clear();
+	foreCal.clear(); backCal.clear(); // These are only used in this function, so they don't need clearing by Clear()
 
-	finalState.clear(); tracks.clear();	towers.clear();
+	Clear();
 	
 	if(clearME) me.clear(); // Clear the matrix element, if requested
 	clearME = true; // Clear next time. Only don't clear when called by operator(Pythia, ...)
@@ -328,14 +342,27 @@ double ArrogantDetector_Lepton::PhiWidth
 void ArrogantDetector_Lepton::Init_phiWidth()
 {
 	phiWidth.clear();
+	
+	// The number of phi towers depends on the central theta, 
+	// due to the differential solid angle dOmega = cos(theta) dTheta dPhi
+	// However, the real solid angle is \int cos(th) = dPhi * (sin(th2) - sin(th1))
+	// dOmega = 2*sin((th2 -th1)/2)*cos((th1 + th2)/2)*dPhi
+	// So for the central band, 
+	// 	dOmega0 = 2*sin(sw/2)*cos(sw/2)*sw   (sw = squareWidth)
+	// And for all other bands,
+	// 	dOmega = 2*sin(sw/2)*cos((2th1 + sw)/2)*dPhi
+	// Setting the two equal and solving for dPhi
+	// 	dPhi = sw*cos(sw/2) / cos((2th1 + sw)/2)
+	phiWidth.push_back(settings.squareWidth);
+	
+	double const dPhiNumerator = 
+		settings.squareWidth * std::cos(0.5*settings.squareWidth);
 		
-	for(double thetaCenter = 0.5 * settings.squareWidth; 
-		thetaCenter < polarMax_cal; thetaCenter += settings.squareWidth)
+	for(double theta1 = settings.squareWidth; 
+		theta1 < polarMax_cal; theta1 += settings.squareWidth)
 	{
-		// The number of phi towers depends on the central theta, 
-		// due to the differential solid angle dOmega = cos(theta) dTheta dPhi
-		double const numPhiTowers = 
-			2.*std::round((M_PI * std::cos(thetaCenter)) / settings.squareWidth);
+		double dPhi = dPhiNumerator / std::cos(0.5*(2.*theta1 + settings.squareWidth));
+		double const numPhiTowers = 2.*std::round(M_PI / dPhi);
 		assert((size_t(numPhiTowers) bitand 1lu) == 0lu); // Check for even number of towers
 		
 		phiWidth.push_back((2. * M_PI) / numPhiTowers);
