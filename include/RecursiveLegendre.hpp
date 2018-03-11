@@ -68,6 +68,7 @@ class RecursiveLegendre
 		
 		size_t l() {return l_this;} //!< @brief The current Legendre index l.
 		
+		incrementArray_t const& P_lm1(){return *Pl_last;} //!< @brief The last \p P_l array.
 		incrementArray_t const& P_l(){return *Pl_this;} //!< @brief The current \p P_l array.
 		
 		//! @brief Reset \ref z to \p z_new and \p l to 0.
