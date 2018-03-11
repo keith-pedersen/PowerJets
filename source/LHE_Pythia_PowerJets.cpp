@@ -5,15 +5,18 @@ void LHE_Pythia_PowerJets::ClearCache()
 	detected.clear();
 	detected_PhatF.clear();
 	H_det.clear();
+	H_showered.clear();
 	fast_jets.clear();
 	ME_vec.clear();
 }
 
 LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(std::string const& ini_filePath):
+	LHE_Pythia_PowerJets(QSettings(ini_filePath.c_str(), QSettings::IniFormat)) {}
+	
+LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(QSettings const& parsedINI):
 	// Because of chained defalt arguments, to send a false for printBanner, 
 	// we have to send the default value for xmlDir.
 	pythia("../xmldoc", false),
-	parsedINI(ini_filePath.c_str(), QSettings::IniFormat),
 		// Note: Must pass NativeFormat, otherwise it doesn't work.
 	detector(ArrogantDetector::NewDetector(parsedINI, "detector")),
 		// The detector's parameters are read from the INI folder [detector]
@@ -22,13 +25,13 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(std::string const& ini_filePath):
 		// HComputer's settings are read from the INI folder [power]
 	gen(false), // initialzed in main body
 	iEvent_plus1(0),
-	lMax(parsedINI.value("power/lMax", 128).toInt()),
+	//~ lMax(parsedINI.value("power/lMax", 128).toInt()),
 	status(Status::UNINIT)
 {
 	// We could be using a file on disk which uses the default name.
 	// We will only use all default values when ini_filePath is not on disk.
-	if(not std::ifstream(ini_filePath.c_str()))
-		std::cerr << "\nWarning: No configuration file supplied ... everything default values.\n\n";
+	//~ if(not std::ifstream(ini_filePath.c_str()))
+		//~ std::cerr << "\nWarning: No configuration file supplied ... everything default values.\n\n";
 	
 	/////////////////////
 	// Initialize fastjet
@@ -191,7 +194,7 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 			
 		detected_PhatF = PhatF::To_PhatF_Vec(detected);
 		
-		// Transfer pythia to jets	
+		// Transfer pythia ME into jets	
 		{
 			auto const finalState_ME = detector->ME();
 			
@@ -204,33 +207,29 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 				ME_vec.emplace_back(particle.px()/Etot, particle.py()/Etot, particle.pz()/Etot,
 					particle.m()/Etot, kdp::Vec4from2::Mass);
 		}
-		
-		{
-			// Fill the particle into a format useful by fastjet
-			std::vector<fastjet::PseudoJet> protojets;
-			{
-				for(vec3_t const& particle : detected)
-				{
-					// energy goes last (wtf?!)
-					protojets.emplace_back(particle.x1, particle.x2, particle.x3, particle.Mag());
-				}
-			}
-			
-			// run the clustering, extract the jets
-			fastjet::ClusterSequence cs(protojets, clusterAlg);
-			std::vector<fastjet::PseudoJet> const jets = fastjet::sorted_by_E(cs.inclusive_jets());
-			
-			fast_jets.insert(fast_jets.end(), jets.cbegin(), jets.cend());
-		}
-			
-		////////////////////////////
-		
-		//~ H_ME = Hcomputer(finalState_ME, lMax);
-		//~ H_showered = Hcomputer(detector.FinalState(), lMax);
-		H_det = Hcomputer(detected_PhatF, lMax);
 	}
 	
 	return status;
+}
+
+void LHE_Pythia_PowerJets::ClusterJets() const
+{
+	// Fill the particle into a format useful by fastjet
+	std::vector<fastjet::PseudoJet> protojets;
+	{
+		for(vec3_t const& particle : detected)
+		{
+			// energy goes last (wtf?!)
+			protojets.emplace_back(particle.x1, particle.x2, particle.x3, particle.Mag());
+		}
+	}
+	
+	// run the clustering, extract the jets
+	fastjet::ClusterSequence cs(protojets, clusterAlg);
+	std::vector<fastjet::PseudoJet> const jets = fastjet::sorted_by_E(cs.inclusive_jets());
+	
+	// We use insert to force an element-wise call to Jet(fastjet::PseudoJet const&)
+	fast_jets.insert(fast_jets.end(), jets.cbegin(), jets.cend());
 }
 
 LHE_Pythia_PowerJets::~LHE_Pythia_PowerJets() 
@@ -296,4 +295,28 @@ LHE_Pythia_PowerJets::vec3_t LHE_Pythia_PowerJets::IsoVec3_Exponential
 	gen.ApplyRandomSign(iso.x3);
 	
 	return iso;
+}
+
+std::vector<Jet> const& LHE_Pythia_PowerJets::Get_FastJets() const
+{
+	if(fast_jets.empty()) 
+		ClusterJets();
+	
+	return fast_jets;	
+}
+
+std::vector<LHE_Pythia_PowerJets::real_t> const&
+LHE_Pythia_PowerJets::Get_H_showered(size_t const lMax)
+{
+	if(H_showered.size() < lMax)
+		H_showered = Hcomputer(detector->FinalState(), lMax);
+	return H_showered;
+}
+
+std::vector<LHE_Pythia_PowerJets::real_t> const&
+LHE_Pythia_PowerJets::Get_H_det(size_t const lMax)
+{
+	if(H_det.size() < lMax)
+		H_det = Hcomputer(detected_PhatF, lMax);
+	return H_det;
 }

@@ -28,12 +28,12 @@ class LHE_Pythia_PowerJets
 		
 		enum class Status {OK, UNINIT, END_OF_FILE, EVENT_MAX, ABORT_MAX};
 		
-		static constexpr char* const ini_filePath_default = "PowerJets.conf";
+		static constexpr char const* const ini_filePath_default = "PowerJets.conf";
 		
 	private:
 		Pythia8::Pythia pythia; //! @brief The Pythia instance
 		
-		QSettings parsedINI; //! @brief The parsed ini file, used to control everything
+		//~ QSettings parsedINI; //! @brief The parsed ini file, used to control everything
 		ArrogantDetector* detector; //! @brief The detector
 			// This is a pointer so we can have either lepton or hadron detector
 			// In the future we can add something like Delphes
@@ -45,14 +45,14 @@ class LHE_Pythia_PowerJets
 		size_t iEvent_end;
 		size_t abortsAllowed;
 		size_t abortCount;
-		size_t lMax;
+		//~ size_t lMax;
 		Status status;
-		
+				
 		// For now, we only cache the pieces we need
 		std::vector<vec3_t> detected; // The final state particles
 		std::vector<PhatF> detected_PhatF; // The final state particles
-		std::vector<real_t> H_det; // The power spectrum for detected particles
-		std::vector<Jet> fast_jets; // Jest clustered from particle_cache using Fastjet
+		std::vector<real_t> H_showered, H_det; // The power spectrum for showered and detected particles
+		mutable std::vector<Jet> fast_jets; // Jest clustered from particle_cache using Fastjet
 		std::vector<Jet> ME_vec;
 		
 		/*! @brief A place to redirect the FastJet banner.
@@ -64,28 +64,31 @@ class LHE_Pythia_PowerJets
 		void ClearCache();
 		
 		Status Next_internal(bool skipAnal);
+		void ClusterJets() const;
 		
 	public:
 		LHE_Pythia_PowerJets(std::string const& ini_filePath = ini_filePath_default);
+		LHE_Pythia_PowerJets(QSettings const& parsedINI);
 		
 		~LHE_Pythia_PowerJets();
 		
 		//////////////////////////////////////////////////////////////////
 		
-		size_t EventIndex() {return iEvent_plus1 - 1;}
+		size_t EventIndex() const {return iEvent_plus1 - 1;}
 		
-		Status GetStatus() {return status;}
+		Status GetStatus() const {return status;}
 		
-		std::vector<vec3_t> const& Get_Detected() {return detected;}
+		std::vector<vec3_t> const& Get_FinalState() const {return detector->FinalState();}
+		std::vector<vec3_t> const& Get_Detected() const {return detected;}
+		std::vector<Jet> const& Get_ME() const {return ME_vec;}
 		
-		std::vector<PhatF> const& Get_Detected_PhatF() {return detected_PhatF;}
+		std::vector<PhatF> const& Get_Detected_PhatF() const {return detected_PhatF;}
 		
-		std::vector<real_t> const& Get_H_det() {return H_det;} 
+		std::vector<Jet> const& Get_FastJets() const;
 		
-		std::vector<Jet> const& Get_FastJets() {return fast_jets;}
-		
-		std::vector<Jet> const& Get_ME() {return ME_vec;}
-		
+		std::vector<real_t> const& Get_H_showered(size_t const lMax);	
+		std::vector<real_t> const& Get_H_det(size_t const lMax);		
+				
 		Status Next() {return Next_internal(false);}
 
 		// Give me a vector pointing in an isotropic direction whose 
