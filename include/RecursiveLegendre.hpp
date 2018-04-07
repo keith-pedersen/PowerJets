@@ -9,6 +9,8 @@
  *  to SIMD instructions, with high cache-hit efficiency. As such,
  *  \p arraySize should be chosen to be some power-of-2 which is 
  *  large enough to span several cache lines.
+ * 
+ *  \note In future: add the ability to use a std::vector or a simple scalar
  *  
  *  \tparam real_t 		the floating-point type used by P_l (a real-valued function)
  *  \tparam arraySize 		the size of the base array (could be any value, even 1, but powers of 2 [especially 32, 64, 128] work best).
@@ -68,8 +70,9 @@ class RecursiveLegendre
 		
 		size_t l() {return l_this;} //!< @brief The current Legendre index l.
 		
-		incrementArray_t const& P_lm1(){return *Pl_last;} //!< @brief The last \p P_l array.
-		incrementArray_t const& P_l(){return *Pl_this;} //!< @brief The current \p P_l array.
+		incrementArray_t const& P_lm2(){return *Pl_next;} //!< @brief \p P_{l-2}
+		incrementArray_t const& P_lm1(){return *Pl_last;} //!< @brief \p P_{l-1}
+		incrementArray_t const& P_l(){return *Pl_this;} //!< @brief \p P_l
 		
 		//! @brief Reset \ref z to \p z_new and \p l to 0.
 		void Setup(incrementArray_t const& z_new)
@@ -102,6 +105,8 @@ class RecursiveLegendre
 			// numbers with the special nan exponent). 
 			// Of course, this does not protect against nan in the current z.
 			Pl_last->fill(real_t(0));
+			// Now that we've added access to P_lm2, zero-fill Pl_next
+			Pl_next->fill(real_t(0));
 		}
 		
 		//! @brief Increment \p l and return the \p P_l array.
@@ -125,10 +130,16 @@ class RecursiveLegendre
 			Pl_last_coeff -= real_t(1); // (-l)
 			
 			{
-				incrementArray_t* __restrict const Pl_newNext = Pl_last;
+				// last = this
+				// this = next
+				// next = last
+				// The next time Next() is called, we overwrite next,
+				// but until then it provides access to the second-to-last value 
+				
+				incrementArray_t* __restrict const Pl_secondLast = Pl_last;
 				Pl_last = Pl_this; // Pl_this -> Pl_last
 				Pl_this = Pl_next; // Pl_next -> Pl_this
-				Pl_next = Pl_newNext; // Pl_last -> Pl_next
+				Pl_next = Pl_secondLast; // Pl_last -> Pl_next
 			}
 			
 			return P_l();

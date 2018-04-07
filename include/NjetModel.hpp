@@ -8,6 +8,8 @@
 #include <vector>
 #include <memory> // ShowerParticle
 #include "fastjet/PseudoJet.hh"
+#include "ShapeFunction.hpp"
+#include <QtCore/QSettings>
 
 //======================================================================
 
@@ -28,7 +30,7 @@
 */
 struct Jet
 {
-	using real_t = SpectralPower::real_t;
+	using real_t = PowerJets::real_t;
 	using vec3_t = kdp::Vector3<real_t>; //!< @brief The 3-vector type
 	using vec4_t = kdp::Vector4<real_t>; //!< @brief The 4-vector type
 	
@@ -59,11 +61,9 @@ struct Jet
 	
 	//! @brief Rotate the z-axis to (sin(theta) cos(phi), sin(theta) sin(phi), cos(phi))
 	template <class T>
-	static void Rotate(std::vector<T>& jetVec, real_t const theta, real_t const phi, real_t const omega)
+	static void Rotate(std::vector<T>& jetVec, vec3_t const& axis, real_t const angle)
 	{
-		kdp::Rot3 rotator(kdp::Vec3(0., 0., 1.), 
-			kdp::Vec3(std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi), std::cos(theta)),
-			omega);
+		kdp::Rot3 rotator(axis, angle);
 			
 		for(auto& jet : jetVec)
 			rotator(jet.p4.p());
@@ -81,7 +81,9 @@ class ShapedJet : public Jet
 	public:
 		//! @brief The address of the jet in the splitting tree.
 		std::vector<bool> address;
-		using Jet::Rotate;
+		h_Boost shape;
+		
+		using Jet::Rotate;		
 	
 		//! @brief Random samples from the jet shape are generated in increments of this size
 		static constexpr size_t incrementSize = size_t(1) << 8; // 512, not too large, not too small
@@ -111,16 +113,17 @@ class ShapedJet : public Jet
 		void SampleShape(incrementArray_t& z_lab, incrementArray_t& y_lab, 
 			pqRand::engine& gen) const;
 		
-		ShapedJet(): Jet() {} // A minimal nullary constructor so Cython can use push_back
+		ShapedJet(): Jet(), shape(real_t(0)) {} // A minimal nullary constructor so Cython can use push_back
 				
 		// The don't initialize constructor
-		explicit ShapedJet(bool): Jet(false) {}
+		explicit ShapedJet(bool): Jet(false), shape(real_t(0)) {}
 		
 		ShapedJet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type,
 			std::vector<bool> address_in = std::vector<bool>(),
 			std::vector<real_t> const& shapeParams = {}):
 			Jet(p3_in, w0, w0type),
-			address(std::move(address_in)) {}
+			address(std::move(address_in)),
+			shape(vec4_t::BetaFrom_Mass_pSquared(mass, p4.p().Mag2())) {}
 				
 		// The interface we expect to use from inside a Cython loop
 		ShapedJet(real_t const x1, real_t const x2, real_t const x3, 
@@ -128,11 +131,14 @@ class ShapedJet : public Jet
 			std::vector<bool> address_in = std::vector<bool>(),
 			std::vector<real_t> const& shapeParams = {}):
 		Jet(x1, x2, x3, w0, w0type),
-		address(std::move(address_in)) {}
+		address(std::move(address_in)),
+		shape(vec4_t::BetaFrom_Mass_pSquared(mass, p4.p().Mag2())) {}
 		
 		// We assume that the shape of the jet will be initialized later, 
 		// after the jet's 4-vector and mass have been defined.
 		void SetShape(param_iter_t const shapeParam_begin, param_iter_t const shapeParam_end);
+		
+		std::vector<real_t> OnAxis(size_t const lMax) const {return shape.OnAxis(lMax);}
 		
 		// cython does not support
 		//~ static bool Sort_by_Mass(ShapedJet const& left, ShapedJet const& right)
@@ -367,7 +373,6 @@ class ShowerParticle : public ShapedJet
 		real_t Total_absElost(real_t const absElost_in = real_t(0));
 };
 
-
 /*! @brief Calculate the spectral power H_l for an n-jet model.
  * 
  *  H_l is calculated from the coefficients rho_l^m when the 
@@ -411,7 +416,7 @@ class NjetModel
 	public:
 		using vec3_t = Jet::vec3_t;
 		using vec4_t = Jet::vec4_t;
-		using real_t = SpectralPower::real_t;
+		using real_t = Jet::real_t;
 		//~ typedef SpectralPower::PhatF PhatF;
 		
 		class JetParticle_Cache
@@ -472,7 +477,7 @@ class NjetModel
 		// The power spectrum from multiplying rho_jets * rho_particles	
 		std::vector<real_t> H_l_JetParticle(JetParticle_Cache const& cache, 
 			std::vector<SpectralPower::PhatF> const& particles, 
-			real_t const theta, real_t const phi, real_t const omega) const;
+			vec3_t const& axis, real_t const angle) const;
 			
 		static std::pair<real_t, real_t> CosSin(vec3_t const&, vec3_t const&);
 					

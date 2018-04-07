@@ -6,14 +6,23 @@
  *  @author Copyright (C) 2017 Keith Pedersen (Keith.David.Pedersen@gmail.com)
  *  @date August 2017
 */
+
+// We will add to this namespace
+namespace PowerJets
+{
+	typedef double real_t;
+};
  
 #include "kdp/kdpVectors.hpp"
 #include "pqRand/pqRand.hpp"
+//~ #include "NjetModel.hpp"
 //~ #include "zLib/kdpRandom.hpp"
 #include "SelfOuterU.hpp"
 #include "Pythia8/Event.h"
 #include <QtCore/QSettings>
 #include <mutex>
+
+class ShapedJet;
 
 /*! @brief An object for managing parallel calculation of spectral power \f$ H_l \f$.
  *  
@@ -56,7 +65,7 @@
 class SpectralPower
 {
 	public:
-		typedef double real_t; //!< The floating point type
+		typedef PowerJets::real_t real_t; //!< The floating point type
 		typedef kdp::Vector3<real_t> vec3_t; //!< The 3-vector type
 		
 		//! @brief A simple struct for storing individual particle information.
@@ -235,6 +244,17 @@ class SpectralPower
 		// Threaded implementation for calculating an increment of H_l
 		std::vector<real_t> H_l_threadedIncrement();
 		
+		static std::vector<real_t> Power_Extensive_SelfTerm(size_t const lMax,
+			std::vector<PhatF> const& particles, std::vector<real_t> const& h_OnAxis);
+
+		static std::vector<real_t> Power_Extensive_SubTerm(size_t const lMax,
+			std::vector<PhatF> const& left, std::vector<real_t> const& h_OnAxis_left, 
+			std::vector<PhatF> const& right, std::vector<real_t> const& h_OnAxis_right);
+			
+		static std::vector<real_t> Power_Jets_Particles_SubTerm(size_t const lMax,
+			std::vector<ShapedJet> const& jets,
+			std::vector<PhatF> const& particles, std::vector<real_t> const& h_OnAxis_particles);
+		
 	public:
 		/*! @brief Read and store the settings.
 		 *  
@@ -251,6 +271,18 @@ class SpectralPower
 		Settings const& GetSettings() {return settings;}
 		Settings const& UpdateSettings(QSettings const& parsedSettings);
 		
+		static std::vector<real_t> Power_Extensive(size_t const lMax,
+			std::vector<PhatF> const& tracks, std::vector<real_t> const& h_OnAxis_tracks, 
+			std::vector<PhatF> const& towers, std::vector<real_t> const& h_OnAxis_towers);
+			
+		static std::vector<real_t> Power_Jets(size_t const lMax, std::vector<ShapedJet> const& jets,
+			std::vector<real_t> const& detectorFilter);
+			
+		static std::vector<real_t> Power_Jets_Particles(size_t const lMax,
+			std::vector<ShapedJet> const& jets,
+			std::vector<PhatF> const& tracks, std::vector<real_t> const& h_OnAxis_tracks, 
+			std::vector<PhatF> const& towers, std::vector<real_t> const& h_OnAxis_towers);
+							
 		/*! @brief Calculate and return \f$ H_l \f$ (l = 1 to \p lMax, since \f$ H_0 = 1 \f$ always).
 		 * 
 		 *  If settings.lFactor, each H_l is scaled by (2l+1).

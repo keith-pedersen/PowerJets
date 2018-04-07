@@ -104,6 +104,7 @@ void ShapedJet::SampleShape(incrementArray_t& z_lab, incrementArray_t& y_lab,
 
 bool ShapedJet::operator<(ShapedJet const& that) const
 {
+	//~ return (this->p4.x0 > that.p4.x0);
 	//~ return (this->p4.x0 / this->mass) < (that.p4.x0 / that.mass);
 	return this->mass > that.mass;
 }
@@ -303,18 +304,26 @@ pol(), inexact(false)
 		 * 	u_sum = sqrt(fabs(u2)) + u*_sum * (1 - sqrt(fabs(u2)))
 		 * 	0 <= u*_sum <= 1
 		*/ 
-		real_t const u2 = splittingParams[0];
-		real_t const uSumStar = splittingParams[1];
+		//~ real_t const u2 = splittingParams[0];
+		//~ real_t const uSumStar = splittingParams[1];
 		
-		real_t const uSum_min = std::sqrt(std::fabs(u2));
-		real_t const uSum = uSum_min + (real_t(1) - uSum_min)*uSumStar;
+		//~ real_t const uSum_min = std::sqrt(std::fabs(u2));
+		//~ real_t const uSum = uSum_min + (real_t(1) - uSum_min)*uSumStar;
 		
-		real_t const uDiff = (uSum == real_t(0)) ? real_t(0) : u2 / uSum;
+		//~ real_t const uDiff = (uSum == real_t(0)) ? real_t(0) : u2 / uSum;
+		
+		//~ MakeDaughters(vec3_t(0., 0., 0.5*std::sqrt(Delta2(uSum, uDiff))),
+			//~ real_t(0.5)*(uSum + uDiff), uSum, vec3_t(1., 0., 0.));
+		
+		real_t const uSum = splittingParams[0];
+		real_t const ubFrac = splittingParams[1];
+		real_t const uDiff = (real_t(2)*ubFrac-1)*uSum;
 		
 		//~ printf("%.16e, %.16e\n", uSum, uDiff);
-	
+		
+		// The CM mommentum is 0.5*std::sqrt(Delta2(uSum, uDiff)) 
 		MakeDaughters(vec3_t(0., 0., 0.5*std::sqrt(Delta2(uSum, uDiff))),
-			real_t(0.5)*(uSum + uDiff), uSum, vec3_t(1., 0., 0.));
+			ubFrac * uSum, uSum, vec3_t(1., 0., 0.));
 			
 		if(params.size() > numRootParams)
 		{
@@ -816,10 +825,10 @@ NjetModel::JetParticle_Cache NjetModel::Make_JetParticle_Cache
 
 std::vector<typename NjetModel::real_t> NjetModel::H_l_JetParticle
 (JetParticle_Cache const& cache, std::vector<SpectralPower::PhatF> const& particles, 
-	real_t const theta, real_t const phi, real_t const omega) const
+	vec3_t const& axis, real_t const angle) const
 {
 	std::vector<ShapedJet> jets_labFrame = cache.jetVec; // copy all jets, so we can modify
-	Jet::Rotate(jets_labFrame, theta, phi, omega);
+	Jet::Rotate(jets_labFrame, axis, angle);
 		
 	// Number of particles probably O(100)
 	static constexpr size_t incrementSize = (size_t(1) << 5);	// 32

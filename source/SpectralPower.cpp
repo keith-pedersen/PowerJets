@@ -1,5 +1,6 @@
 #include "SpectralPower.hpp"
 #include "SelfOuterU.hpp"
+#include "NjetModel.hpp"
 #include "kdp/kdpTools.hpp"
 #include "RecursiveLegendre.hpp"
 #include <array>
@@ -356,3 +357,272 @@ std::vector<typename SpectralPower::real_t> SpectralPower::H_l_threadedIncrement
 	
 	return H_l_vec;
 }
+
+std::vector<SpectralPower::real_t> SpectralPower::Power_Extensive(size_t const lMax,
+	std::vector<PhatF> const& tracks, std::vector<real_t> const& h_OnAxis_tracks, 
+	std::vector<PhatF> const& towers, std::vector<real_t> const& h_OnAxis_towers)
+{
+	auto H_l_vec = Power_Extensive_SelfTerm(lMax, tracks, h_OnAxis_tracks);
+	H_l_vec += Power_Extensive_SelfTerm(lMax, towers, h_OnAxis_towers);
+	H_l_vec += Power_Extensive_SubTerm(lMax, tracks, h_OnAxis_tracks, towers, h_OnAxis_towers)*real_t(2);
+	
+	return H_l_vec;
+}
+
+std::vector<SpectralPower::real_t> SpectralPower::Power_Extensive_SelfTerm(size_t const lMax,
+	std::vector<PhatF> const& particles, std::vector<real_t> const& h_OnAxis)
+{
+	// Redundant caclculation of self terms, but good enough for now.
+	return Power_Extensive_SubTerm(lMax, particles, h_OnAxis, particles, h_OnAxis);
+}
+
+std::vector<SpectralPower::real_t> SpectralPower::Power_Extensive_SubTerm(size_t const lMax,
+	std::vector<PhatF> const& left, std::vector<real_t> const& h_OnAxis_left, 
+	std::vector<PhatF> const& right, std::vector<real_t> const& h_OnAxis_right)
+{
+	// Allocate a vector of H_l to return, which we constantly add to (so initialize to zero).
+	// H_l[0] actually corresponds to l == 1 (because H_0 = 1 always), so allocate lMax.
+	std::vector<real_t> H_l_vec(lMax, 0);
+	size_t constexpr incrementSize = 64;
+	
+	if(H_l_vec.size())
+	{
+		assert((h_OnAxis_left.size() - 1) >= lMax);
+		assert((h_OnAxis_right.size() - 1) >= lMax);
+		
+		auto const lFactor = [&](){
+			// Assume h_OnAxis starts with l=0, which we don't want
+			assert(h_OnAxis_left.front() == real_t(1));
+			assert(h_OnAxis_right.front() == real_t(1));
+			
+			std::vector<real_t> hMul(h_OnAxis_left.begin() + 1, h_OnAxis_left.begin() + lMax + 1);
+			for(size_t l = 0; l < hMul.size(); ++l)
+				hMul[l] *= h_OnAxis_right[l + 1];
+				
+			return hMul;}();
+		assert(lFactor.size() == lMax);
+	
+		RecursiveLegendre<real_t, incrementSize> Pl_computer;
+		
+		using incrementArray_t = decltype(Pl_computer)::incrementArray_t;	
+		
+		incrementArray_t 
+			fProd_increment, // increments of fProd, filled by outer
+			H_l_accumulate; // the elements (P_l * fProd)_k, which we sum
+		
+		size_t k = 0;
+		
+		for(size_t i = 0; i < left.size(); ++i)
+		{
+			for(size_t j = 0; j < right.size(); ++j)
+			{
+				fProd_increment[k] = left[i].f * right[j].f;
+				Pl_computer.z[k] = left[i].pHat.Dot(right[j].pHat);
+				++k;		
+				
+				// Fill the final increment with zeros
+				if((i == (left.size() - 1)) and (j == (right.size() - 1)))
+				{
+					while(k < incrementSize)
+					{
+						fProd_increment[k] = real_t(0);
+						Pl_computer.z[k] = real_t(0);
+						++k;
+					}
+				}
+				
+				if(k == incrementSize)
+				{
+					Pl_computer.Reset();
+					assert(Pl_computer.l() == 0);
+				
+					for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+					{
+						auto const& P_l_increment = Pl_computer.Next(); // Get the next P_l
+						//~ assert((lMinus1 + 1) == Pl_computer.l());
+						
+						// Do a dot product with fProd
+						for(size_t m = 0; m <incrementSize; ++m)
+							H_l_accumulate[m] = P_l_increment[m] * fProd_increment[m];
+									
+						H_l_vec[lMinus1] += lFactor[lMinus1] * 
+							kdp::BinaryAccumulate_Destructive(H_l_accumulate);
+					}// Done l-loop
+					
+					k = 0; // Start the next increment
+				}
+			}
+		}
+	}
+	
+	return H_l_vec;
+}
+
+std::vector<SpectralPower::real_t> SpectralPower::Power_Jets(size_t const lMax,
+	std::vector<ShapedJet> const& jets, std::vector<real_t> const& detectorFilter)
+{
+	std::vector<real_t> H_l_vec(lMax, 0);
+	size_t constexpr incrementSize = 64;
+	
+	RecursiveLegendre<real_t, incrementSize> Pl_computer;
+	using incrementArray_t = decltype(Pl_computer)::incrementArray_t;	
+	
+	std::vector<std::vector<real_t>> h_OnAxis;
+	Pl_computer.z.fill(real_t(0));
+		
+	{
+		size_t k = 0;
+		
+		for(size_t i = 0; i < jets.size(); ++i)
+		{
+			vec3_t pHat_i = vec3_t(jets[i].p4.p()).Normalize();
+			h_OnAxis.push_back(jets[i].OnAxis(lMax));
+			h_OnAxis.back() *= jets[i].p4.x0;
+			
+			for(size_t j = i + 1; j < jets.size(); ++j)
+				Pl_computer.z[k++] = pHat_i.Dot(vec3_t(jets[j].p4.p()).Normalize());
+		}
+		
+		assert(k <= incrementSize);
+	}
+	
+	Pl_computer.Reset();
+	incrementArray_t 
+		weight,
+		H_l_accumulate; // the elements (P_l * fProd)_k, which we sum
+		
+	weight.fill(real_t(0));
+			
+	for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+	{
+		H_l_accumulate.fill(real_t(0));
+		auto const& P_l_increment = Pl_computer.Next(); // Get the next P_l
+		
+		for(auto const& h : h_OnAxis)
+			H_l_vec[lMinus1] += kdp::Squared(h[lMinus1 + 1]);
+			
+		{
+			size_t k = 0;
+		
+			for(size_t i = 0; i < jets.size(); ++i)
+			{
+				for(size_t j = i + 1; j < jets.size(); ++j)
+					weight[k++] = real_t(2) * h_OnAxis[i][lMinus1 + 1] * h_OnAxis[j][lMinus1 + 1];
+			}
+		}
+		
+		for(size_t k = 0; k < incrementSize; ++k)
+			H_l_accumulate[k] = P_l_increment[k] * weight[k];
+		
+		H_l_vec[lMinus1] += kdp::BinaryAccumulate_Destructive(H_l_accumulate);
+	}
+	
+	assert(detectorFilter.size() > lMax);
+	for(size_t i = 0; i < lMax; ++i)
+		H_l_vec[i] *= detectorFilter[i + 1];		
+	
+	return H_l_vec;
+}
+
+// WARNING: something broken here
+std::vector<SpectralPower::real_t> SpectralPower::Power_Jets_Particles(size_t const lMax,
+	std::vector<ShapedJet> const& jets,
+	std::vector<PhatF> const& tracks, std::vector<real_t> const& h_OnAxis_tracks, 
+	std::vector<PhatF> const& towers, std::vector<real_t> const& h_OnAxis_towers)
+{
+	auto H_l_vec = Power_Jets_Particles_SubTerm(lMax, jets, tracks, h_OnAxis_tracks);
+	H_l_vec += Power_Jets_Particles_SubTerm(lMax, jets, towers, h_OnAxis_towers);
+	
+	return H_l_vec;
+}
+
+std::vector<SpectralPower::real_t> SpectralPower::Power_Jets_Particles_SubTerm(size_t const lMax,
+	std::vector<ShapedJet> const& jets,
+	std::vector<PhatF> const& particles, std::vector<real_t> const& h_OnAxis_particles)
+{
+		// Allocate a vector of H_l to return, which we constantly add to (so initialize to zero).
+	// H_l[0] actually corresponds to l == 1 (because H_0 = 1 always), so allocate lMax.
+	std::vector<real_t> H_l_vec(lMax, real_t(0));
+	size_t constexpr incrementSize = 32;
+	assert(H_l_vec.size() == lMax);
+	
+	if(H_l_vec.size())
+	{
+		assert((h_OnAxis_particles.size() - 1) >= lMax);
+		
+		RecursiveLegendre<real_t, incrementSize> Pl_computer;
+		
+		using incrementArray_t = decltype(Pl_computer)::incrementArray_t;	
+		
+		incrementArray_t 
+			fProd_increment, // increments of fProd, filled by outer
+			H_l_accumulate; // the elements (P_l * fProd)_k, which we sum
+		
+		for(ShapedJet const& jet : jets)
+		{
+			auto const lFactor = [&](){
+				auto h_OnAxis_jet = jet.OnAxis(lMax);
+				
+				// Assume h_OnAxis starts with l=0, which we don't want
+				assert(h_OnAxis_jet.front() == real_t(1));
+				assert(h_OnAxis_particles.front() == real_t(1));
+				
+				h_OnAxis_jet.erase(h_OnAxis_jet.begin()); // We don't need the leading 1
+				for(size_t l = 0; l < lMax; ++l)
+					h_OnAxis_jet[l] *= h_OnAxis_particles[l + 1];
+					
+				return h_OnAxis_jet;}();
+			assert(lFactor.size() == lMax);
+				
+			vec3_t const jet_pHat = vec3_t(jet.p4.p()).Normalize();
+			real_t const jet_f = jet.p4.x0;
+				
+			size_t k = 0;
+			
+			for(size_t j = 0; j < particles.size(); ++j)
+			{
+				fProd_increment[k] = jet_f * particles[j].f;
+				Pl_computer.z[k] = jet_pHat.Dot(particles[j].pHat);
+				++k;
+				
+				// Fill the final increment with zeros
+				if(j == (particles.size() - 1))
+				{
+					while(k < incrementSize)
+					{
+						fProd_increment[k] = real_t(0);
+						Pl_computer.z[k] = real_t(0);
+						++k;
+					}
+				}
+				
+				if(k == incrementSize)
+				{
+					Pl_computer.Reset();
+					//~ assert(Pl_computer.l() == 0);
+				
+					for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+					{
+						//~ std::cout << lMinus1 << "\t" << size_t(H_l_vec.data()) << std::endl;
+						auto const& P_l_increment = Pl_computer.Next(); // Get the next P_l
+						//~ assert((lMinus1 + 1) == Pl_computer.l());
+						
+						// Do a dot product with fProd
+						for(size_t m = 0; m <incrementSize; ++m)
+							H_l_accumulate[m] = P_l_increment[m] * fProd_increment[m];
+									
+						H_l_vec[lMinus1] += lFactor[lMinus1] * 
+							kdp::BinaryAccumulate_Destructive(H_l_accumulate);
+					}// Done l-loop
+					
+					k = 0; // MUST reset k 
+				}
+				
+				assert(k < incrementSize);
+			}
+		}
+	}
+	
+	return H_l_vec;
+}
+

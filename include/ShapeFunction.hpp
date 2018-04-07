@@ -8,36 +8,42 @@
 class ShapeFunction
 {
 	public:
-		typedef SpectralPower::real_t real_t;
+		using real_t = PowerJets::real_t;
 		
 	protected:
 		mutable std::vector<real_t> onAxis;
 	
-		virtual void Fill_OnAxis(size_t const lMax) = 0;
+		virtual void Fill_OnAxis(size_t const lMax) const = 0;
 	
 	public:		
-		std::vector<real_t> const& OnAxis(size_t const lMax);
+		/*! @brief Get the vector of on-axis coefficients for l=0 to l=lMax
+		 *  
+		 *  @warning This returned vector is guarenteed to be <em> as long <\em>
+		 *  as \p lMax, but can be longer. It may also grow in size after you obtain it, 
+		 *  but will never shrink.
+		 */
+		std::vector<real_t> const& OnAxis(size_t const lMax) const;
 };
 
 class h_Cap : public ShapeFunction
 {
 	protected:
-		void Fill_OnAxis(size_t const lMax);
-	
-	public:
-		real_t const twiceSurfaceFraction;
+		real_t twiceSurfaceFraction;
+		
+		void Fill_OnAxis(size_t const lMax) const;
 		mutable RecursiveLegendre<real_t, 1> Pl_computer;
-	
+			
+	public:
 		h_Cap(real_t const surfaceFraction);
 };
 
 class h_Unstable : public ShapeFunction
 {
 	protected:
-		size_t l;
-		real_t lPlus1, twoLplus1;
-		real_t const threshold;
-		bool stable;
+		mutable size_t l;
+		mutable real_t lPlus1, twoLplus1;
+		real_t threshold;
+		mutable bool stable;
 			
 		virtual real_t h_1() const = 0;
 		//! @brief The ratio of h_l / h_(l-1), to be used once h_l < threshold 
@@ -45,26 +51,26 @@ class h_Unstable : public ShapeFunction
 		virtual real_t NotIsotropic() const = 0;
 				
 		//! @brief Set the l + 1 element of coeff
-		virtual void h_lp1() = 0;
+		virtual void h_lp1() const = 0;
 		
-		void Reset(size_t const lMax);
+		void Reset(size_t const lMax) const;
 		
 		h_Unstable(real_t const threshold_in);
 	
-		void Fill_OnAxis(size_t const lMax);
+		void Fill_OnAxis(size_t const lMax) const;
 };
 
 class h_Gaussian : public h_Unstable
 {
 	private:
-		real_t const lambda;
-		real_t const lambda2;
+		real_t lambda;
+		real_t lambda2;
 	
 	protected:
 		real_t h_1() const;		
 		real_t Asym_Ratio() const;	
 		real_t NotIsotropic() const;		
-		void h_lp1();
+		void h_lp1() const;
 		
 	public:
 		h_Gaussian(real_t const lambda_in, real_t threshold_in = 1e-6);
@@ -73,13 +79,13 @@ class h_Gaussian : public h_Unstable
 class h_Boost : public h_Unstable
 {
 	private:
-		real_t const beta;
+		real_t beta;
 	
 	protected:
 		real_t h_1() const;		
 		real_t Asym_Ratio() const;	
 		real_t NotIsotropic() const;		
-		void h_lp1();
+		void h_lp1() const;
 		
 	public:
 		h_Boost(real_t const beta_in, real_t threshold_in = 1e-6);

@@ -1,9 +1,9 @@
 #include "ShapeFunction.hpp"
 
 
-std::vector<ShapeFunction::real_t> const& ShapeFunction::OnAxis(size_t const lMax)
+std::vector<ShapeFunction::real_t> const& ShapeFunction::OnAxis(size_t const lMax) const
 {
-	if(onAxis.size() not_eq (lMax + 1))
+	if(onAxis.size() < (lMax + 1))
 		this->Fill_OnAxis(lMax);
 	
 	return onAxis;
@@ -17,7 +17,7 @@ h_Cap::h_Cap(real_t const surfaceFraction):
 	assert(surfaceFraction < 1);
 }
 
-void h_Cap::Fill_OnAxis(size_t const lMax)
+void h_Cap::Fill_OnAxis(size_t const lMax) const
 {
 	Pl_computer.z.front() = real_t(1) - twiceSurfaceFraction;
 	Pl_computer.Reset();
@@ -33,9 +33,11 @@ void h_Cap::Fill_OnAxis(size_t const lMax)
 	
 	for(size_t l = 1; l <= lMax; ++l)
 	{
-		real_t P_lm1 = Pl_computer.P_lm1().front(); // Make sure this get's called first
-		onAxis[l] = (P_lm1 - Pl_computer.Next().front())/
-			((twolp1 += real_t(2)) * twiceSurfaceFraction);
+		Pl_computer.Next(); // Keep the Pl_computer at l+1, b/c we need P_(l-1) - P_(l+1)
+		twolp1 += real_t(2); // Keep twolp1 at l
+		
+		onAxis[l] = (Pl_computer.P_lm2().front() - Pl_computer.P_l.front())/
+			(twolp1 * twiceSurfaceFraction);
 	}
 }
 	
@@ -44,7 +46,7 @@ void h_Cap::Fill_OnAxis(size_t const lMax)
 h_Unstable::h_Unstable(real_t const threshold_in):
 	threshold(threshold_in) {}
 	
-void h_Unstable::Reset(size_t const lMax)
+void h_Unstable::Reset(size_t const lMax) const
 {
 	onAxis.assign(lMax + 1, real_t(0)); // Fill with zeroes
 	
@@ -60,7 +62,7 @@ void h_Unstable::Reset(size_t const lMax)
 	stable = true;
 }
 
-void h_Unstable::Fill_OnAxis(size_t const lMax)
+void h_Unstable::Fill_OnAxis(size_t const lMax) const
 {
 	Reset(lMax);
 	
@@ -127,7 +129,7 @@ h_Gaussian::real_t h_Gaussian::NotIsotropic() const
 	return (lambda < 1e3);
 }
 
-void h_Gaussian::h_lp1()
+void h_Gaussian::h_lp1() const
 {
 	onAxis[l+1] = -twoLplus1*lambda2*onAxis[l] + onAxis[l-1];
 }
@@ -139,18 +141,23 @@ h_Boost::h_Boost(real_t const beta_in, real_t threshold_in):
 	beta(beta_in)
 {
 	assert(beta >= real_t(0));
-	assert(beta < real_t(1));
+	assert(beta <= real_t(1));
 }
 
 h_Boost::real_t h_Boost::h_1() const
 {
-	real_t const val = real_t(1) + ((real_t(1) - beta)/beta)*
-		(real_t(1) - (real_t(1) + beta)/beta * std::atanh(beta));
-	
-	assert(val >= real_t(0));
-	assert(val < real_t(1));
-	
-	return val;
+	if(beta == real_t(1)) 
+		return real_t(1);
+	else
+	{
+		real_t const val = real_t(1) + ((real_t(1) - beta)/beta)*
+			(real_t(1) - (real_t(1) + beta)/beta * std::atanh(beta));
+		
+		assert(val >= real_t(0));
+		assert(val < real_t(1));
+		
+		return val;
+	}
 }
 
 h_Boost::real_t h_Boost::Asym_Ratio() const
@@ -165,7 +172,7 @@ h_Boost::real_t h_Boost::NotIsotropic() const
 	return (beta > 1e-6);
 }
 
-void h_Boost::h_lp1()
+void h_Boost::h_lp1() const
 {
 	onAxis[l+1] = (twoLplus1*onAxis[l] - beta*lPlus1*onAxis[l-1])/(beta*(lPlus1 - real_t(1)));
 }

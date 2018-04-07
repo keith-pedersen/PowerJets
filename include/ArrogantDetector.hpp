@@ -220,7 +220,8 @@ class ArrogantDetector
 		//! @brief Get towers from the calorimeter, with missing energy at the back.
 		inline std::vector<vec3_t> const& Towers() const {return towers;}
 		
-		//! @brief Return the location of every tower, weighted by their dOmega / (4 pi)
+		//! @brief Return the location of every tower, 
+		//  with a length equal to their dimensionless areaa dA = dOmega / (4 pi)
 		std::vector<vec3_t> GetTowerArea() const;
 		
 		inline Settings const& GetSettings() const {return settings;}

@@ -56,25 +56,34 @@ include "kdp/kdpVectors.hpy"
 
 # To allow the objects to have the same name in Cython and C++,
 # we import as **_c, giving the full C++ name in quotes
+cdef extern from "ShapeFunction.hpp":
+	cdef cppclass h_Boost:
+		vector[double] OnAxis(const size_t) const
+
 cdef extern from "NjetModel.hpp":
 	cdef cppclass Jet:
 		Vec4_c p4
 		double mass
 		
 		@staticmethod
-		void Rotate[T](vector[T]& jetVec, const double theta, const double phi, const double omega)
+		void Rotate[T](vector[T]& jetVec, const Vec3_c& axis, const double angle)
 		
 	cdef cppclass ShapedJet:
 		Vec4_c p4
 		double mass
 		vector[bool] address
+		h_Boost shape
 		
 		ShapedJet()
 		ShapedJet(const double, const double, const double, const double, 
 			const Vec4from2, vector[bool], const vector[double]&) except +
 		ShapedJet(const Vec3_c&, const double, const Vec4from2, vector[bool], const vector[double]&) except +
 		
+		vector[double] OnAxis() const
 		bool operator<(const ShapedJet& that)
+		
+		@staticmethod
+		void Rotate(vector[ShapedJet]& jetVec, const Vec3_c& axis, const double angle)
 		
 #~ 		@staticmethod
 #~ 		bool Sort_by_Mass(const ShapedJet& left, const ShapedJet& right)
@@ -97,6 +106,7 @@ cdef extern from "NjetModel.hpp":
 		
 		NjetModel_c(const string& iniFileName) except +
 		
+		@staticmethod
 		JetParticle_Cache Make_JetParticle_Cache(const vector[ShapedJet]& jetVec_in,
 			const size_t lMax, const double jetShapeGranularity) except +
 		
@@ -107,6 +117,11 @@ cdef extern from "NjetModel.hpp":
 		
 		
 cdef extern from "SpectralPower.hpp":
+	cdef cppclass SpectralPower:
+		@staticmethod
+		vector[double] Power_Jets(const size_t lMax, 
+			const vector[ShapedJet]& jets, const vector[double]& detectorFilter)
+	
 	cdef cppclass PhatF "SpectralPower:PhatF":
 		pass	
 		
@@ -128,11 +143,19 @@ cdef extern from "LHE_Pythia_PowerJets.hpp":
 		
 		const vector[Vec3_c]& Get_Detected()	
 		const vector[PhatF]& Get_Detected_PhatF()
-		const vector[double]& Get_H_det()		
+#~ 		const vector[double]& Get_H_det(const size_t lMax)	
+		const vector[double]& Get_H_extensive(const size_t lMax)
 		const vector[Jet]& Get_FastJets()
 		const vector[Jet]& Get_ME()
 		
+		const vector[Vec4_c]& Get_Pileup()
+		
+		const vector[double]& Get_DetectorFilter(const size_t lMax)
+		
+		vector[double] Calculate_H_Jets_Particles(const size_t, vector[ShapedJet]&)
+		
 		Status Next()
+		Status Repeat()
 			
 ########################################################################		
 # Now we make the Cython wrapper class of the C++ object
@@ -184,7 +207,8 @@ cdef class _PowerJetFitter:
 	using compiled C code. It does not actually do any of the fitting.''' 
 	cdef LHE_Pythia_PowerJets* c_pythia
 	cdef NjetModel_c* c_model
-	cdef NjetModel_c.JetParticle_Cache cache
+#~ 	cdef NjetModel_c.JetParticle_Cache cache
+	cdef vector[ShapedJet] orientationCache
 	
 	#####################################################################
 	
@@ -215,8 +239,8 @@ cdef class _PowerJetFitter:
 		return self.c_pythia.EventIndex()
 		
 	#####################################################################
-	def Get_H_det(self):
-		return StdVecToNumpy(self.c_pythia.Get_H_det())
+	def Get_H_det(self, const int lMax = 128):
+		return StdVecToNumpy(self.c_pythia.Get_H_extensive(lMax))
 		
 	#####################################################################
 	
@@ -317,9 +341,14 @@ cdef class _PowerJetFitter:
 	
 	def SetupOrientationFit(self, jetParams, dict jetParamDict, int lMax=128, double granularity=1e6):
 		'''The orientation fit will use the same jets and density rho'''
-		self.cache = self.c_model.Make_JetParticle_Cache( 
-			_PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict),
-			lMax, granularity)
+#~ 		self.cache = self.c_model.Make_JetParticle_Cache(
+#~ 			_PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict),
+#~ 			lMax, granularity)
+		self.orientationCache =  _PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict)
+		
+		for jet in self.orientationCache:
+			print(jet.p4.x0)
+			jet.shape.OnAxis(lMax) # Generate the on-axis coefficients to cache them
 	
 	@staticmethod
 	def GetJets_All(jetParams, dict jetParamDict, 
@@ -328,7 +357,7 @@ cdef class _PowerJetFitter:
 		cdef vector[ShapedJet] jetVec = _PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict)
 		
 		if((rotate_theta != 0.) and (rotate_phi != 0.)):
-			Jet.Rotate(jetVec, rotate_theta, rotate_phi, rotate_omega)
+			Jet.Rotate(jetVec, Vec3_c(1., rotate_theta, rotate_phi, V3f_LengthThetaPhi), rotate_omega)
 		
 		return [kdp.Vec4.Factory(<const Vec4_c&>jet.p4) for jet in jetVec], [jet.mass for jet in jetVec], [jet.address for jet in jetVec]
 	
@@ -353,14 +382,15 @@ cdef class _PowerJetFitter:
 		
 		stdsort(jetVec.begin(), jetVec.end());
 		
-		boostList = list()
+#~ 		boostList = list()
+		massList = list()
 		addressList = list()
 		
 		for jet in jetVec:
-			boostList += [jet.p4.x0 / jet.mass,]
+			massList += [jet.mass,]
 			addressList += [tuple(jet.address),]
 			
-		return boostList, addressList
+		return massList, addressList
 	
 	#####################################################################
 	
@@ -377,8 +407,16 @@ cdef class _PowerJetFitter:
 		if (jetParamDict.get(pileup_key, True)):
 			jetFraction -= jetParams[0]
 			
-		return StdVecToNumpy(self.c_model.H_l(_PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict), 
-			lMax, granularity)) * jetFraction**2
+#~ 		return StdVecToNumpy(self.c_model.H_l(_PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict), 
+#~ 			lMax, granularity)) * jetFraction**2
+			
+#~ 		return StdVecToNumpy(LHE_Pythia_PowerJets.Calculate_H_Jets_Particles(lMax,
+#~ 		_PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict))) * jetFraction**2
+
+		return StdVecToNumpy(SpectralPower.Power_Jets(lMax,
+		_PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict),
+#~ 		numpy.ones(lMax + 1))) * jetFraction**2
+		self.c_pythia.Get_DetectorFilter(lMax))) * jetFraction**2
 			
 	#####################################################################
 	
@@ -410,10 +448,37 @@ cdef class _PowerJetFitter:
 		else:
 			resid = _PowerJetFitter._AbsErrorUtil(fit, obs)
 			
-		return resid/numpy.power(numpy.arange(1, len(fit) + 1), 0.25)
+		return resid
+#~ 		/numpy.power(numpy.arange(1, len(fit) + 1), 0.5)
 			
 
-	def H_l_jet_error_vec(self, jetParams, dict jetParamDict, int lMax, double granularity, 
+	def H_l_jet_error_vec(self, jetParams, dict jetParamDict, int lMax, lAsym = [30, 60],
+		const bool relative = False):
+		''' Given jetParams in the correct format (see GetJets),
+			return the vector of residuals (chi_l = H_l_jet - H_l_obs).
+			
+			granularity is the approximate number of random numbers drawn.
+			
+			If relative = True, the residuals are relative.'''
+		
+		if(len(lAsym)):
+			H_l_fit_raw = self.H_l(jetParams, jetParamDict, lAsym[-1]+5)
+			H_l_obs_raw = self.Get_H_det(lAsym[-1]+5)
+			
+			H_l_fit = H_l_fit_raw[0:lMax]
+			H_l_obs = H_l_obs_raw[0:lMax]
+			
+			for l in lAsym:
+				H_l_fit = numpy.append(H_l_fit, numpy.mean(H_l_fit_raw[l-5:l+5]))
+				H_l_obs = numpy.append(H_l_obs, numpy.mean(H_l_obs_raw[l-5:l+5]))
+		else:
+			H_l_fit = self.H_l(jetParams, jetParamDict, lMax)
+			H_l_obs = H_l_obs_raw = self.Get_H_det(lMax)[0:lMax]		
+			
+		return _PowerJetFitter._H_l_error_vec(H_l_fit, H_l_obs, relative)
+		
+	def H_l_jet_error_vec_oneSplit(self, newParams, existingParams, 
+		dict jetParamDict, int lMax, lAsym = [30, 60],
 		const bool relative = False):
 		''' Given jetParams in the correct format (see GetJets),
 			return the vector of residuals (chi_l = H_l_jet - H_l_obs).
@@ -422,15 +487,55 @@ cdef class _PowerJetFitter:
 			
 			If relative = True, the residuals are relative.'''
 			
-		H_l_fit = self.H_l(jetParams, jetParamDict, lMax, granularity)
+		jetParams = list(newParams) + list(existingParams)
+		
+		if(len(lAsym)):
+			H_l_fit_raw = self.H_l(jetParams, jetParamDict, lAsym[-1]+5)
+			H_l_obs_raw = self.Get_H_det(lAsym[-1]+5)
 			
-		return _PowerJetFitter._H_l_error_vec(H_l_fit, self.Get_H_det()[0:lMax], relative)
+			H_l_fit = H_l_fit_raw[0:lMax]
+			H_l_obs = H_l_obs_raw[0:lMax]
 			
-	def H_l_jet_particle_error_vec(self, angleParams, numpy.ndarray[double, ndim=1] H_obs,
+			for l in lAsym:
+				H_l_fit = numpy.append(H_l_fit, numpy.mean(H_l_fit_raw[l-5:l+5]))
+				H_l_obs = numpy.append(H_l_obs, numpy.mean(H_l_obs_raw[l-5:l+5]))
+		else:
+			H_l_fit = self.H_l(jetParams, jetParamDict, lMax)
+			H_l_obs = H_l_obs_raw = self.Get_H_det(lMax)[0:lMax]		
+			
+		return _PowerJetFitter._H_l_error_vec(H_l_fit, H_l_obs, relative)
+		
+	def H_l_jet_particle(self, angleParams, 
+		numpy.ndarray[double, ndim=1] H_obs, numpy.ndarray[double, ndim=1] H_jet,
 		const double pileupFrac = 0., const bool relative = False):
+#~ 		H_l_fit = StdVecToNumpy(self.c_model.H_l_JetParticle(self.cache, 
+#~ 			self.c_pythia.Get_Detected_PhatF(), 
+#~ 			angleParams[0], angleParams[1], angleParams[2]))*(1. - pileupFrac)**2
+
+		cdef vector[ShapedJet] jetCopy = self.orientationCache
+		ShapedJet.Rotate(jetCopy, Vec3_c(1., angleParams[0], angleParams[1], V3f_LengthThetaPhi), angleParams[2])
+#~ 		print(jetCopy[0].p4.p().Theta())
+
+		cross = StdVecToNumpy(self.c_pythia.Calculate_H_Jets_Particles(len(H_obs), jetCopy))*((1. - pileupFrac)**2)
 		
-		H_l_fit = StdVecToNumpy(self.c_model.H_l_JetParticle(self.cache, 
-			self.c_pythia.Get_Detected_PhatF(), 
-			angleParams[0], angleParams[1], angleParams[2]))*(1. - pileupFrac)**2
+		# Here's what we're doing and why
+		# 1. If we just do the jet-particle cross-term, H_l can become negative
+		#    The safety is not guarenteed because we're not actually squaring something
+		# 2. So if we define rho = 0.5 * (rotated_jets + particles), 
+		#    only when we have right rotation should we get the right power.
+		# 3. Unfortunately, after prelim tests, much more likely to get the signals crossed, 
+		#    though definitely never negative.
+		return cross*0.5 + (H_obs + H_jet)*0.25
+			
+	def H_l_jet_particle_error_vec(self, angleParams,
+		numpy.ndarray[double, ndim=1] H_obs, numpy.ndarray[double, ndim=1] H_jet,
+		const double pileupFrac = 0., const bool relative = False):
+			
+		return _PowerJetFitter._H_l_error_vec(self.H_l_jet_particle(angleParams, H_obs, H_jet, pileupFrac),
+			H_obs, relative)
+			
+	def NumPileup(self):
+		return int(self.c_pythia.Get_Pileup().size());
 		
-		return _PowerJetFitter._H_l_error_vec(H_l_fit, H_obs, relative)
+	def Repeat(self):
+		self.c_pythia.Repeat()

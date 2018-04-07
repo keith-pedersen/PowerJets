@@ -5,6 +5,7 @@
 #include "SpectralPower.hpp"
 #include "ArrogantDetector.hpp"
 #include "NjetModel.hpp"
+#include "ShapeFunction.hpp"
 
 #include "fastjet/ClusterSequence.hh"
 
@@ -30,6 +31,8 @@ class LHE_Pythia_PowerJets
 		
 		static constexpr char const* const ini_filePath_default = "PowerJets.conf";
 		
+		static constexpr real_t chargeFraction = real_t(0.59);
+		
 	private:
 		Pythia8::Pythia pythia; //! @brief The Pythia instance
 		
@@ -51,9 +54,21 @@ class LHE_Pythia_PowerJets
 		// For now, we only cache the pieces we need
 		std::vector<vec3_t> detected; // The final state particles
 		std::vector<PhatF> detected_PhatF; // The final state particles
-		std::vector<real_t> H_showered, H_det; // The power spectrum for showered and detected particles
+		std::vector<real_t> H_showered, H_det, H_extensive, detectorFilter; // The power spectrum for showered and detected particles
 		mutable std::vector<Jet> fast_jets; // Jest clustered from particle_cache using Fastjet
 		std::vector<Jet> ME_vec;
+		std::vector<vec4_t> pileup;
+		
+		ShapeFunction* trackShape;
+		ShapeFunction* towerShape;
+		
+		std::vector<PhatF> tracks;
+		std::vector<PhatF> towers;
+		
+		enum class PileupBalancingScheme {back2back, shim};
+		real_t pileup_noise2signal;
+		real_t pileup_meanF;		
+		PileupBalancingScheme puBalancingScheme;		
 		
 		/*! @brief A place to redirect the FastJet banner.
 		 * 
@@ -64,7 +79,11 @@ class LHE_Pythia_PowerJets
 		void ClearCache();
 		
 		Status Next_internal(bool skipAnal);
+		Status DoWork();
+		
 		void ClusterJets() const;
+		
+		void MakePileup();		
 		
 	public:
 		LHE_Pythia_PowerJets(std::string const& ini_filePath = ini_filePath_default);
@@ -88,12 +107,21 @@ class LHE_Pythia_PowerJets
 		
 		std::vector<real_t> const& Get_H_showered(size_t const lMax);	
 		std::vector<real_t> const& Get_H_det(size_t const lMax);		
+		std::vector<real_t> const& Get_H_extensive(size_t const lMax);
+		
+		std::vector<vec4_t> const& Get_Pileup() {return pileup;}
+		
+		std::vector<real_t> const& Get_DetectorFilter(size_t const lMax);
+		
+		std::vector<real_t> Calculate_H_Jets_Particles(size_t const lMax,
+			std::vector<ShapedJet>& jets);
 				
 		Status Next() {return Next_internal(false);}
+		Status Repeat() {return DoWork();}
 
 		// Give me a vector pointing in an isotropic direction whose 
 		// length follows an exponential distribution with mean = 1/lambda
-		static vec3_t IsoVec3_Exponential(pqRand::engine& gen, double const meanE, double& length);
+		static vec4_t IsoVec3_Exponential(pqRand::engine& gen, real_t const meanE);
 };
 
 // That transformation is best which transforms least
