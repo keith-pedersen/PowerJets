@@ -36,7 +36,7 @@ void h_Cap::Fill_OnAxis(size_t const lMax) const
 		Pl_computer.Next(); // Keep the Pl_computer at l+1, b/c we need P_(l-1) - P_(l+1)
 		twolp1 += real_t(2); // Keep twolp1 at l
 		
-		onAxis[l] = (Pl_computer.P_lm2().front() - Pl_computer.P_l.front())/
+		onAxis[l] = (Pl_computer.P_lm2().front() - Pl_computer.P_l().front())/
 			(twolp1 * twiceSurfaceFraction);
 	}
 }
