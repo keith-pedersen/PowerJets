@@ -7,10 +7,9 @@ void LHE_Pythia_PowerJets::ClearCache()
 	detected_PhatF.clear();
 	pileup.clear();
 	
-	H_det.clear();
-	H_showered.clear();
-	H_extensive.clear();
-	
+	Hl_FinalState.clear();
+	Hl_Obs.clear();
+		
 	fast_jets.clear();
 	ME_vec.clear();
 	
@@ -41,7 +40,7 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(QSettings const& parsedINI):
 	//~ if(not std::ifstream(ini_filePath.c_str()))
 		//~ std::cerr << "\nWarning: No configuration file supplied ... everything default values.\n\n";
 	
-	kdp::LimitMemory(1.);
+	kdp::LimitMemory(2.);
 	
 	/////////////////////
 	// Initialize fastjet
@@ -156,13 +155,32 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork()
 		MakePileup();
 		
 		(*detector)(pythia, pileup);
-				
-		//~ auto const finalState_ME = PhatF::PythiaToPhatF(detector.ME());
+		
 		detected = detector->Tracks();
 		detected.insert(detected.end(), 
 			detector->Towers().cbegin(), detector->Towers().cend());
+		
+		real_t totalE = 0.;	
+		
+		for(auto const& track : detector->Tracks())
+		{
+			tracks.emplace_back(track);
+			totalE += tracks.back().f;
+		}
+		
+		for(auto const& tower : detector->Towers())
+		{
+			towers.emplace_back(tower);
+			totalE += towers.back().f;
+		}
+							
+		for(auto& track : tracks)
+			track.f /= totalE;
+		
+		for(auto& tower : towers)
+			tower.f /= totalE;
 			
-		detected_PhatF = PhatF::To_PhatF_Vec(detected);
+		//~ detected_PhatF = PhatF::To_PhatF_Vec(detected);
 		
 		// Transfer pythia ME into jets	
 		{
@@ -178,6 +196,8 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork()
 					particle.m()/Etot, kdp::Vec4from2::Mass);
 		}
 	}
+	
+	return status;
 }
 
 LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
@@ -218,9 +238,7 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 	if(skipAnal)
 		return status;				
 	
-	DoWork();
-	
-	return status;
+	return DoWork();
 }
 
 void LHE_Pythia_PowerJets::ClusterJets() const
@@ -241,6 +259,27 @@ void LHE_Pythia_PowerJets::ClusterJets() const
 	
 	// We use insert to force an element-wise call to Jet(fastjet::PseudoJet const&)
 	fast_jets.insert(fast_jets.end(), jets.cbegin(), jets.cend());
+}
+
+void LHE_Pythia_PowerJets::WriteAllVisibleAsTowers(std::string const& filePath)
+{
+	std::ofstream file(filePath, std::ios::trunc);
+	
+	// Write to a *.dat with space/tab separated for easy Mathematica import
+	if(file.is_open())
+	{
+		char buffer[1024];
+		
+		auto const allAsTowers = detector->AllVisibleAsTowers();
+		
+		for(auto const& tower : allAsTowers)
+		{
+			sprintf(buffer, "% .6e % .6e % .6e % .6e % .6e\n", 
+				tower.first[0], tower.first[1], tower.first[2], tower.first[3],
+				tower.second);
+			file << buffer;
+		}		
+	}
 }
 
 LHE_Pythia_PowerJets::~LHE_Pythia_PowerJets() 
@@ -316,90 +355,52 @@ std::vector<Jet> const& LHE_Pythia_PowerJets::Get_FastJets() const
 	if(fast_jets.empty()) 
 		ClusterJets();
 	
-	return fast_jets;	
+	return fast_jets;
 }
 
 std::vector<LHE_Pythia_PowerJets::real_t> const&
-LHE_Pythia_PowerJets::Get_H_showered(size_t const lMax)
+LHE_Pythia_PowerJets::Get_Hl_FinalState(size_t const lMax)
 {
-	if(H_showered.size() < lMax)
-		H_showered = Hcomputer(detector->FinalState(), lMax);
-	return H_showered;
+	if(Hl_FinalState.size() <= lMax)
+		Hl_FinalState = Hcomputer.Hl_Obs(lMax, PhatF::To_PhatF_Vec(detector->FinalState()), *trackShape);
+	return Hl_FinalState;
 }
 
 std::vector<LHE_Pythia_PowerJets::real_t> const&
-LHE_Pythia_PowerJets::Get_H_det(size_t const lMax)
+LHE_Pythia_PowerJets::Get_Hl_Obs(size_t const lMax)
 {
-	if(H_det.size() < lMax)
-		H_det = Hcomputer(detected_PhatF, lMax);
-	return H_det;
+	if(Hl_Obs.size() < lMax)
+		Hl_Obs = SpectralPower::Hl_Obs(lMax, tracks, *trackShape, towers, *towerShape);
+	return Hl_Obs;
 }
 
-std::vector<LHE_Pythia_PowerJets::real_t> const&
-LHE_Pythia_PowerJets::Get_H_extensive(size_t const lMax)
+std::vector<LHE_Pythia_PowerJets::real_t> const
+LHE_Pythia_PowerJets::Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets)
 {
-	if(H_extensive.size() < lMax)
-	{
-		auto const& tracks_raw = detector->Tracks();
-		auto const& towers_raw = detector->Towers();
-		double trackE = 0.;
-		double towerE = 0.;
-		
-		for(auto const& track : tracks_raw)
-		{
-			trackE += track.Mag();
-		}
-		
-		for(auto const& tower : towers_raw)
-		{
-			towerE += tower.Mag();
-		}
-		
-		tracks = PhatF::To_PhatF_Vec(tracks_raw);
-		towers = PhatF::To_PhatF_Vec(towers_raw);
-		
-		double const trackF = trackE / (trackE + towerE);
-		double const towerF = towerE / (trackE + towerE);
-		
-		for(auto& track : tracks)
-			track.f *= trackF;
-		
-		for(auto& tower : towers)
-			tower.f *= towerF;
-			
-		H_extensive = SpectralPower::Power_Extensive(lMax, 
-			tracks, trackShape->OnAxis(lMax),
-			towers, towerShape->OnAxis(lMax));
-	}
-			
-	return H_extensive;
+	return SpectralPower::Hl_Jet(lMax, jets, Get_DetectorFilter(lMax));
+}
+
+std::vector<LHE_Pythia_PowerJets::real_t> const
+LHE_Pythia_PowerJets::Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets)
+{
+	return SpectralPower::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax),
+		tracks, *trackShape, towers, *towerShape, Get_Hl_Obs(lMax));
 }
 
 std::vector<LHE_Pythia_PowerJets::real_t> const& LHE_Pythia_PowerJets::Get_DetectorFilter(size_t const lMax)
 {
-	if(detectorFilter.size() < (lMax + 1))
+	if(detectorFilter.size() < lMax)
 	{
-		auto const& track = trackShape->OnAxis(lMax);
-		auto const& tower = towerShape->OnAxis(lMax);
+		std::vector<real_t> hl_track(trackShape->OnAxis(lMax).begin(), trackShape->OnAxis(lMax).begin() + lMax);
+		std::vector<real_t> hl_tower(towerShape->OnAxis(lMax).begin(), towerShape->OnAxis(lMax).begin() + lMax);
 		
-		detectorFilter.resize(lMax + 1);
+		hl_track *= chargeFraction;
+		hl_tower *= real_t(1) - chargeFraction;
 		
-		real_t const oneMinusFrac = real_t(1) - chargeFraction;
-		
-		for(size_t i = 0; i <= lMax; ++i)
-			detectorFilter[i] = kdp::Squared(chargeFraction*track[i] + oneMinusFrac*tower[i]);
+		detectorFilter = hl_track + hl_tower;
 	}
 	
 	return detectorFilter;
-}
-
-std::vector<LHE_Pythia_PowerJets::real_t> 
-LHE_Pythia_PowerJets::Calculate_H_Jets_Particles(size_t const lMax,
-	std::vector<ShapedJet>& jets)
-{
-	return SpectralPower::Power_Jets_Particles(lMax, jets, 
-		tracks, trackShape->OnAxis(lMax),
-		towers, towerShape->OnAxis(lMax));
 }
 
 void LHE_Pythia_PowerJets::MakePileup()

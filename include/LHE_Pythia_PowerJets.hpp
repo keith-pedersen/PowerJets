@@ -2,6 +2,9 @@
 // By Keith.David.Pedersen@gmail.com (kpeders1@hawk.iit.edu)
 // Adapted from PYTHIA main11.cc (licenced under the GNU GPL version 2)
 
+// TODO: 
+// 1. Make shape functions return l=1--lMax, so there is never any mismatch
+
 #include "SpectralPower.hpp"
 #include "ArrogantDetector.hpp"
 #include "NjetModel.hpp"
@@ -54,7 +57,8 @@ class LHE_Pythia_PowerJets
 		// For now, we only cache the pieces we need
 		std::vector<vec3_t> detected; // The final state particles
 		std::vector<PhatF> detected_PhatF; // The final state particles
-		std::vector<real_t> H_showered, H_det, H_extensive, detectorFilter; // The power spectrum for showered and detected particles
+		std::vector<real_t> Hl_FinalState, Hl_Obs, 
+			detectorFilter; // The power spectrum for showered and detected particles
 		mutable std::vector<Jet> fast_jets; // Jest clustered from particle_cache using Fastjet
 		std::vector<Jet> ME_vec;
 		std::vector<vec4_t> pileup;
@@ -101,20 +105,24 @@ class LHE_Pythia_PowerJets
 		std::vector<vec3_t> const& Get_Detected() const {return detected;}
 		std::vector<Jet> const& Get_ME() const {return ME_vec;}
 		
-		std::vector<PhatF> const& Get_Detected_PhatF() const {return detected_PhatF;}
-		
+		std::vector<vec4_t> const& Get_Pileup() {return pileup;}
 		std::vector<Jet> const& Get_FastJets() const;
 		
-		std::vector<real_t> const& Get_H_showered(size_t const lMax);	
-		std::vector<real_t> const& Get_H_det(size_t const lMax);		
-		std::vector<real_t> const& Get_H_extensive(size_t const lMax);
+		void WriteAllVisibleAsTowers(std::string const& filePath);
 		
-		std::vector<vec4_t> const& Get_Pileup() {return pileup;}
-		
+		//! @brief (tau * h_l^trk + (1-tau) * h_l^twr)
 		std::vector<real_t> const& Get_DetectorFilter(size_t const lMax);
+				
+		//~ std::vector<PhatF> const& Get_Detected_PhatF() const {return detected_PhatF;}
 		
-		std::vector<real_t> Calculate_H_Jets_Particles(size_t const lMax,
-			std::vector<ShapedJet>& jets);
+		//~ std::vector<real_t> const& Get_H_showered(size_t const lMax);	
+		//~ std::vector<real_t> const& Get_H_det(size_t const lMax);		
+		//~ std::vector<real_t> const& Get_H_extensive(size_t const lMax);
+		
+		std::vector<real_t> const& Get_Hl_FinalState(size_t const lMax);
+		std::vector<real_t> const& Get_Hl_Obs(size_t const lMax);
+		std::vector<real_t> const Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets);
+		std::vector<real_t> const Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets);
 				
 		Status Next() {return Next_internal(false);}
 		Status Repeat() {return DoWork();}

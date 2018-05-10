@@ -7,12 +7,7 @@
  *  @date August 2017
 */
 
-// We will add to this namespace
-namespace PowerJets
-{
-	typedef double real_t;
-};
- 
+#include "PowerJets.hpp"
 #include "kdp/kdpVectors.hpp"
 #include "pqRand/pqRand.hpp"
 //~ #include "NjetModel.hpp"
@@ -23,6 +18,7 @@ namespace PowerJets
 #include <mutex>
 
 class ShapedJet;
+class ShapeFunction;
 
 /*! @brief An object for managing parallel calculation of spectral power \f$ H_l \f$.
  *  
@@ -74,17 +70,24 @@ class SpectralPower
 			vec3_t pHat; //!< @brief Unit-direction of travel.
 			real_t f; //!< @brief Energy fraction (versus total event energy).
 			
+			// This forces normalization			
+			PhatF(vec3_t const& p3):
+				pHat(p3), f(p3.Mag())
+			{
+				pHat /= f;
+			}		
+			
 			/*! @brief Construct from a 3-vector and energy fraction
 			 *  
 			 *  @param p3	The incoming 3-vector
 			 *  @param f_in 	The incoming energy fraction
 			 *  @param normalize 	If true, normalize \p pHat after construction
 			 */ 
-			PhatF(vec3_t const& p3, real_t const f_in, bool const normalize = true):
-				pHat(p3), f(f_in)
-			{
-				if(normalize) pHat.Normalize();
-			}
+			//~ PhatF(vec3_t const& p3, real_t const f_in, bool const normalize = true):
+				//~ pHat(p3), f(f_in)
+			//~ {
+				//~ if(normalize) pHat.Normalize();
+			//~ }
 			
 			/*! @brief Construct from a 3-vector's components and energy fraction
 			 *  
@@ -92,14 +95,17 @@ class SpectralPower
 			 *  @param f_in 	The energy fraction
 			 *  @param normalize 	If true, normalize \p pHat after construction
 			 */ 
-			PhatF(real_t const px, real_t const py, real_t const pz, 
-				real_t f_in, bool const normalize = true):
-			PhatF(vec3_t(px, py, pz), f_in, normalize) {}
+			PhatF(real_t const px, real_t const py, real_t const pz, real_t f_in):
+			pHat(px, py, pz), f(f_in)
+			{
+				// Normalize to momentum, in case particle has small mass
+				pHat.Normalize();
+			}
 			
 			PhatF(Pythia8::Particle const& particle):
-				PhatF(particle.px(), particle.py(), particle.pz(), particle.e(), true) {}
+				PhatF(particle.px(), particle.py(), particle.pz(), particle.e()) {}
 				
-			static std::vector<PhatF> To_PhatF_Vec(std::vector<Pythia8::Particle> const& original);
+			//~ static std::vector<PhatF> To_PhatF_Vec(std::vector<Pythia8::Particle> const& original);
 			static std::vector<PhatF> To_PhatF_Vec(std::vector<vec3_t> const& original);
 		};
 
@@ -130,7 +136,7 @@ class SpectralPower
 				 *  @param orig 	the std::vector<PhatF>
 				 *  @param normalize the pHat in the vector-of-classes
 				*/ 
-				PhatFvec(std::vector<PhatF> const& orig, bool const normalize = false);
+				PhatFvec(std::vector<PhatF> const& orig);
 				PhatFvec() {} //!< @brief Construct an empty PhatFvec.
 				
 				// We can use implicit copy and move for ctors and assigment, 
@@ -139,9 +145,12 @@ class SpectralPower
 				inline size_t size() const {return f.size();}
 				void reserve(size_t const reserveSize);
 				void clear();
+				
+				void emplace_back(PhatF const& pHatF);
+				
 				//! @brief emplace back, with auto-normalization.
-				void emplace_back(vec3_t const& pHat, real_t const f_in, 
-					bool const normalize = true);
+				//~ void emplace_back(vec3_t const& pHat, real_t const f_in, 
+					//~ bool const normalize = true);
 				
 				//~ static constexpr size_t tileWidth = 32;
 				//~ // Calculate and set |p>.<p| and |f>*<f| from the values contained,
@@ -244,16 +253,16 @@ class SpectralPower
 		// Threaded implementation for calculating an increment of H_l
 		std::vector<real_t> H_l_threadedIncrement();
 		
-		static std::vector<real_t> Power_Extensive_SelfTerm(size_t const lMax,
-			std::vector<PhatF> const& particles, std::vector<real_t> const& h_OnAxis);
+		static std::vector<real_t> Hl_Extensive_SelfTerm(size_t const lMax,
+			std::vector<PhatF> const& particles, std::vector<real_t> const& hl_onAxis);
 
-		static std::vector<real_t> Power_Extensive_SubTerm(size_t const lMax,
-			std::vector<PhatF> const& left, std::vector<real_t> const& h_OnAxis_left, 
-			std::vector<PhatF> const& right, std::vector<real_t> const& h_OnAxis_right);
+		static std::vector<real_t> Hl_Extensive_SubTerm(size_t const lMax,
+			std::vector<PhatF> const& left, std::vector<real_t> const& hl_onAxis_left, 
+			std::vector<PhatF> const& right, std::vector<real_t> const& hl_OnAxis_right);
 			
-		static std::vector<real_t> Power_Jets_Particles_SubTerm(size_t const lMax,
-			std::vector<ShapedJet> const& jets,
-			std::vector<PhatF> const& particles, std::vector<real_t> const& h_OnAxis_particles);
+		static std::vector<real_t> Hl_Jets_Particles_SubTerm(size_t const lMax,
+			std::vector<ShapedJet> const& jets,  std::vector<real_t> const& hl_onAxis_Filter,
+			std::vector<PhatF> const& particles, std::vector<real_t> const& hl_onAxis_particles);
 		
 	public:
 		/*! @brief Read and store the settings.
@@ -270,18 +279,6 @@ class SpectralPower
 		
 		Settings const& GetSettings() {return settings;}
 		Settings const& UpdateSettings(QSettings const& parsedSettings);
-		
-		static std::vector<real_t> Power_Extensive(size_t const lMax,
-			std::vector<PhatF> const& tracks, std::vector<real_t> const& h_OnAxis_tracks, 
-			std::vector<PhatF> const& towers, std::vector<real_t> const& h_OnAxis_towers);
-			
-		static std::vector<real_t> Power_Jets(size_t const lMax, std::vector<ShapedJet> const& jets,
-			std::vector<real_t> const& detectorFilter);
-			
-		static std::vector<real_t> Power_Jets_Particles(size_t const lMax,
-			std::vector<ShapedJet> const& jets,
-			std::vector<PhatF> const& tracks, std::vector<real_t> const& h_OnAxis_tracks, 
-			std::vector<PhatF> const& towers, std::vector<real_t> const& h_OnAxis_towers);
 							
 		/*! @brief Calculate and return \f$ H_l \f$ (l = 1 to \p lMax, since \f$ H_0 = 1 \f$ always).
 		 * 
@@ -293,14 +290,30 @@ class SpectralPower
 		 *  @param numThreads_requested	The number of threads requested.
 		 *  @return The power spectrum.
 		*/ 
-		std::vector<real_t> operator()(PhatFvec const& particles,
-			size_t const lMax, 
+		std::vector<real_t> Hl(size_t const lMax,
+			PhatFvec const& particles,
 			size_t const numThreads_requested = 0); // If zero, defer to internal settings
 			
-		std::vector<real_t> operator()(std::vector<vec3_t> const& particles,
-			size_t const lMax, 
+		std::vector<real_t> Hl(size_t const lMax, 
+			std::vector<vec3_t> const& particles,			
 			size_t const numThreads_requested = 0); // If zero, defer to internal settings
 			
+		static std::vector<real_t> Hl_Obs(size_t const lMax,
+			std::vector<PhatF> const& particles, ShapeFunction const& particleShape);
+			
+		static std::vector<real_t> Hl_Obs(size_t const lMax,
+			std::vector<PhatF> const& tracks, ShapeFunction const& trackShape, 
+			std::vector<PhatF> const& towers, ShapeFunction const& towerShape);
+		
+		static std::vector<real_t> Hl_Jet(size_t const lMax, 
+			std::vector<ShapedJet> const& jets, std::vector<real_t> const& hl_onAxis_Filter);
+		
+		static std::vector<real_t> Hl_Hybrid(size_t const lMax,
+			std::vector<ShapedJet> const& jets, std::vector<real_t> const& hl_onAxis_Filter,
+			std::vector<PhatF> const& tracks, ShapeFunction const& trackShape,
+			std::vector<PhatF> const& towers, ShapeFunction const& towerShape,
+			std::vector<real_t> const& Hl_Obs_in = std::vector<real_t>());
+				
 		void Write_Hl_toFile(std::string const& filePath,
 			std::vector<vec3_t> const& particles,
 			size_t const lMax, size_t const numThreads_requested = 0);			
@@ -328,7 +341,7 @@ class SpectralPower
  * 		b. Comments remind YOU what the hell YOU were thinking six months ago.
  * 			Why is it designed this way? How does this wicked optimization work?
  * 			What the hell is going on?!
- * 2. Don't repeate yourself (DRY) may not always be fastest, but it creates 
+ * 2. Don't repeat yourself (DRY) may not always be fastest, but it creates 
  * 	the most reliable code (debugged, validated, DON'T TOUCH).
  * 3. Leave space (in the API) for features or functions you may one day need. 
  * 	BUT DON'T WRITE THEM TILL YOU NEED THEM!

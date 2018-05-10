@@ -141,6 +141,13 @@ void ShowerParticle::Split(param_iter_t const param_begin, param_iter_t param_en
 	real_t const ubFrac = splittingParams[1]; // We now know that size is at least 3
 	real_t const uSum = splittingParams[0];
 	
+	if((zStar > real_t(1)) or (zStar < real_t(0)))
+		throw std::domain_error("ShowerParticle::Split: zStar must be in the inclusive unit interval.");
+	if((ubFrac > real_t(1)) or (ubFrac < real_t(0)))
+		throw std::domain_error("ShowerParticle::Split: u_b* must be in the inclusive unit interval.");
+	if((uSum > real_t(1)) or (uSum < real_t(0)))
+		throw std::domain_error("ShowerParticle::Split: u_sum must be in the inclusive unit interval.");		
+	
 	real_t const uDiff = (real_t(2) * ubFrac - real_t(1)) * uSum;
 					
 	vec3_t const& p3_a = p4.p();
@@ -159,7 +166,8 @@ void ShowerParticle::Split(param_iter_t const param_begin, param_iter_t param_en
 			real_t(0.5)*(real_t(1) + uDiff * uSum + 
 			(real_t(2) * zStar - real_t(1)) * 
 			std::sqrt((massSquared + pSquared)/ pSquared * Delta2(uSum, uDiff)));
-		assert(not std::isnan(r));
+		assert(Delta2(uSum, uDiff) >= real_t(0));
+		assert(not std::isnan(r));		
 		
 		p3_b *= r;
 	}
@@ -180,16 +188,19 @@ void ShowerParticle::Split(param_iter_t const param_begin, param_iter_t param_en
 			
 			// The polarization vector rotates by phi degrees.
 			// 	rotated = cos * original + sin * transverse
-			// We obtain the transverse unit vector via (pol x pHat)
-			vec3_t const kT_hat = pol.Cross(p_hat).Normalize();
-			// We (silently) enforce |phi| < pi/2 by simply forcing cos to be positive
-			newPol = (pol * std::fabs(std::cos(phi)) + kT_hat * std::sin(phi)).Normalize();
+			// To keep polarization consistent with the diagram in the thesis, 
+			// we obtain the transverse unit vector via (pHat x pol) [opposite the original code]
+			//~ vec3_t const kT_hat = pol.Cross(p_hat).Normalize();
+			vec3_t const kT_hat = p_hat.Cross(pol).Normalize();
+			// DO NOT silently enforce |phi| < pi/2 by forcing cos to be positive [as in the original code],
+			// let the fitting routine correct large angles after the fact
+			newPol = (pol * std::cos(phi) + kT_hat * std::sin(phi)).Normalize();
 		}
 		
 		real_t const kT_mag = std::sqrt(zStar * (real_t(1) - zStar) * 
 			kdp::Diff2(real_t(1), uSum) * kdp::Diff2(real_t(1), uDiff) * massSquared);
 										
-		p3_b += newPol.Cross(p_hat).Normalize() * kT_mag;
+		p3_b += p_hat.Cross(newPol).Normalize() * kT_mag;
 	}
 	
 	MakeDaughters(p3_b, ubFrac * uSum, uSum, newPol);
@@ -201,7 +212,15 @@ void ShowerParticle::MakeDaughters(vec3_t const& p3_b,
 	real_t const u_b, real_t const uSum, vec3_t const& newPol)
 {
 	b = new ShowerParticle(this, p3_b, u_b * mass, newPol, DaughterAddress(false));
-	c = new ShowerParticle(this, p4.p() - p3_b, uSum * mass - b->mass, newPol, DaughterAddress(true));
+	
+	// Got a negative mass errors (machine epsilon subtraction error)
+	// when ubFrac = 1. This code will prevent future occurrences.
+	real_t u_c = uSum * mass - b->mass;
+	assert(u_c > -real_t(1e-15)*mass);
+	if(u_c < real_t(0))
+		u_c = real_t(0);
+	
+	c = new ShowerParticle(this, p4.p() - p3_b, u_c, newPol, DaughterAddress(true));
 	
 	//~ b = std::shared_ptr<ShowerParticle>(new ShowerParticle(this, p3_b, u_b * mass, newPol));
 	//~ c = std::shared_ptr<ShowerParticle>(new ShowerParticle(this, p4.p() - p3_b, uSum * mass - b->mass, newPol));
@@ -276,19 +295,109 @@ ShowerParticle::address_error ShowerParticle::AddressAlreadySplit
 ////////////////////////////////////////////////////////////////////////
 
 ShowerParticle::ShowerParticle(std::vector<real_t> const& params, 
-	std::vector<std::vector<bool>> const& addresses):
+	std::vector<std::vector<bool>> const& addresses, bool const orientation):
+// Build the root node in its CM frame with energy = 1
 ShapedJet(vec3_t(), real_t(1), kdp::Vec4from2::Mass),
 mother(nullptr), b(nullptr), c(nullptr),
 pol(), inexact(false)
 {
-	static constexpr size_t numRootParams = 2;
+	/* There are two formats for params
+	 * 
+	 * no orientation (2, 3, then 4 per splitting):
+	 * 
+	 * 	params = {
+	 * 		u_sum, u_b*, 
+	 * 		u_sum, u_b*, z*,
+	 *       u_sum, u_b*, z*, phi,
+	 * 		etc}
+	 * 
+	 * orientation (4 params per splitting)
+	 * 	
+	 * 	params = {
+	 * 		u_sum, u_b*, theta', phi', 
+	 * 		u_sum, u_b*, z*, omega',
+	 *       u_sum, u_b*, z*, phi,
+	 * 		etc}
+	 * 
+	 * The first parameters never has an address because they must be the root.
+	 * The next bit of code sorts between these two options and acts accordingly. 
+	*/ 
+	
 	using vec3_t = ShowerParticle::vec3_t;
+	
+	// If we don't care about orientation, then the choice of
+	// original splitting axis and orientation is arbitrary (they must be perpendicular).
+	vec3_t dijetAxis(0., 0., 1.);
+	vec3_t dijetPol(1., 0., 0.);
+	
+	static constexpr size_t numRootParams = 2; // Num params to specify the root branching
+	static constexpr size_t numNextParams = 3; // Num params to specify the next branching
+	
+	if(orientation)
+	{
+		// 4 parameters for every splitting, including the root splitting
+		if((4 * (addresses.size() + 1)) not_eq params.size())
+			throw std::runtime_error("ShowerParticle: Number of parameters supplied does not match number of addresses" +
+				std::string("(with orientation, 4 for every particle)."));
+		
+		// omega defines the orientation of the first splitting plane
+		// either it's the 8th parameter or it's zero (because we don't split twice)
+		real_t const omega = bool(addresses.size()) ? params[7] : real_t(0);
+		
+		// We rotate z^ to some off-axis position, then rotate about this axis by omega
+		kdp::Rotate3<real_t> rot(dijetAxis, vec3_t(1., params[2], params[3], 
+			kdp::Vec3from::LengthThetaPhi), omega);
+		
+		rot(dijetAxis);
+		rot(dijetPol);
+	}
+	else
+	{
+		if((addresses.empty() and (params.size() not_eq numRootParams)) or 
+			(addresses.size() and (4 * addresses.size() - 1) not_eq (params.size() - numRootParams)))
+		{
+			throw std::runtime_error("ShowerParticle: Number of parameters supplied does not match number of addresses" +
+				std::string("(2 for the first particle, 3 for the second, 4 for all subsequent)."));
+		}
+	}
+	
+	using param_it = std::vector<real_t>::const_iterator;
+		
+	// For all branches after the root branching, store the first and last parameter iterator
+	std::vector<std::pair<param_it, param_it>> param_begin_end;
+	
+	if(addresses.size())
+	{
+		if(orientation)
+			param_begin_end.emplace_back(params.begin() + 4, 
+				params.begin() + 4 + numNextParams);
+		else
+			param_begin_end.emplace_back(params.begin() + numRootParams, 
+				params.begin() + numRootParams + numNextParams);
+		
+		for(size_t i = 1; i < addresses.size(); ++i)
+		{
+			auto first = param_begin_end.back().second;
+			if ((i == 1) and orientation) 
+				++first;
+				
+			param_begin_end.emplace_back(first, first + 4);
+		}
+				
+		// Verify that we've used all the parameters
+		assert(param_begin_end.size() == addresses.size());
+		
+		if(addresses.size() == 1)
+			assert(param_begin_end.back().second == (params.end() - (orientation ? 1 : 0)));
+		else
+			assert(param_begin_end.back().second == params.end());
+	}
 	
 	// The root splitting needs 2 parameters
 	if(params.size() >= numRootParams)
 	{
-		splittingParams = std::vector<real_t>(params.cbegin(), 
-			params.cbegin() + numRootParams);
+		//~ splittingParams = std::vector<real_t>(params.cbegin(), 
+			//~ params.cbegin() + numRootParams);
 			
 		/* We treat the root splitting differently, to mantain the correct toplogy
 		 * (we want the top two partons on either side of the event).
@@ -315,36 +424,24 @@ pol(), inexact(false)
 		//~ MakeDaughters(vec3_t(0., 0., 0.5*std::sqrt(Delta2(uSum, uDiff))),
 			//~ real_t(0.5)*(uSum + uDiff), uSum, vec3_t(1., 0., 0.));
 		
-		real_t const uSum = splittingParams[0];
-		real_t const ubFrac = splittingParams[1];
-		real_t const uDiff = (real_t(2)*ubFrac-1)*uSum;
+		real_t const uSum = params[0];
+		real_t const ubFrac = params[1];
+		real_t const uDiff = (real_t(2)*ubFrac - real_t(1))*uSum;
 		
 		//~ printf("%.16e, %.16e\n", uSum, uDiff);
 		
 		// The CM mommentum is 0.5*std::sqrt(Delta2(uSum, uDiff)) 
-		MakeDaughters(vec3_t(0., 0., 0.5*std::sqrt(Delta2(uSum, uDiff))),
-			ubFrac * uSum, uSum, vec3_t(1., 0., 0.));
+		MakeDaughters(dijetAxis * 0.5 * std::sqrt(Delta2(uSum, uDiff)),
+			ubFrac * uSum, uSum, dijetPol);
 			
-		if(params.size() > numRootParams)
+		for(size_t i = 0; i < addresses.size(); ++i)
 		{
-			if((4 * addresses.size() - 1) not_eq (params.size() - numRootParams))
-				throw std::runtime_error("ShowerParticle: Number of parameters supplied does not match number of addresses" +
-					std::string("(2 for the first particle, 3 for the second, 4 for all subsequent)."));
+			ShowerParticle& toSplit = LocateParticle(addresses[i]);
+				
+			if(toSplit.isBranch())
+				throw AddressAlreadySplit(addresses[i]);
 			
-			param_iter_t params_begin = params.cbegin() + numRootParams;
-			
-			for(size_t i = 0; i < addresses.size(); ++i)
-			{
-				param_iter_t params_end = params_begin + ((i == 0) ? 3 : 4);
-				ShowerParticle& toSplit = LocateParticle(addresses[i]);
-				
-				if(toSplit.isBranch())
-					throw AddressAlreadySplit(addresses[i]);
-				
-				toSplit.Split(params_begin, params_end);
-				
-				params_begin = params_end;
-			}
+			toSplit.Split(param_begin_end[i].first, param_begin_end[i].second);
 		}
 	}
 }
@@ -505,8 +602,9 @@ std::vector<std::vector<NjetModel::real_t>> NjetModel::DoIncrements_jet_i
 	pqRand::engine gen(false); // Don't auto-seed; gen is unitialized
 	gen.Seed_FromString(generator_seed);
 	
-	RecursiveLegendre<real_t, ShapedJet::incrementSize> Pl_computer;
-	using incrementArray_t = decltype(Pl_computer)::incrementArray_t;
+	using incrementArray_t = std::array<real_t, ShapedJet::incrementSize>;
+	
+	RecursiveLegendre_Increment<incrementArray_t> Pl_computer;	
 	
 	// Each jet will fill shape variate positions into these two arrays
 	incrementArray_t z_lab, y_lab;
@@ -548,10 +646,11 @@ std::vector<std::vector<NjetModel::real_t>> NjetModel::DoIncrements_jet_i
 				
 			Pl_computer.Reset();
 			
-			// loop over l
+			// loop over l, starting with l=1
 			for(auto& rho_accumulate_j_l : rho_accumulate[j - j_begin])
 			{
-				rho_accumulate_j_l += kdp::BinaryAccumulate(Pl_computer.Next());
+				Pl_computer.Next(); // To prevent unnecessary calculation, run at start of loop
+				rho_accumulate_j_l += kdp::BinaryAccumulate(Pl_computer.P_lm1()); // l is one ahead, use lm1
 				assert(not std::isnan(rho_accumulate_j_l));
 			}
 		}
@@ -832,8 +931,8 @@ std::vector<typename NjetModel::real_t> NjetModel::H_l_JetParticle
 		
 	// Number of particles probably O(100)
 	static constexpr size_t incrementSize = (size_t(1) << 5);	// 32
-	RecursiveLegendre<real_t, incrementSize> Pl_computer;
-	using array_t = decltype(Pl_computer)::incrementArray_t;
+	using array_t = std::array<real_t, incrementSize>;
+	RecursiveLegendre_Increment<array_t> Pl_computer;
 	
 	size_t const lMax = cache.lMax();
 	std::vector<real_t> H_l_vec(lMax, real_t(0));	
@@ -866,10 +965,10 @@ std::vector<typename NjetModel::real_t> NjetModel::H_l_JetParticle
 				
 			for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
 			{
-				array_t const& Pl_z = Pl_computer.Next();
+				Pl_computer.Next();
 				
 				for(size_t k = 0; k < incrementSize; ++k)
-					rho_i_particles_increment[k] = f_particle[k] * Pl_z[k];
+					rho_i_particles_increment[k] = f_particle[k] * Pl_computer.P_lm1()[k];
 					
 				rho_i_particle[lMinus1] += kdp::BinaryAccumulate(rho_i_particles_increment);
 			}

@@ -75,6 +75,9 @@ class ArrogantDetector
 				double const etaMax_track; //!< @brief The maximum pseudorapidity of the tracker.
 				double const minTrackPT; //!< @brief The minimum pT of detectable tracks.
 							
+				// Read in the requested squareWidth, which is the phi width of towers in the central band, 
+				// then round it so that there are an even number of towers in the central band.
+				// Use this integer to define the actual squareWidth
 				Settings(QSettings const& parsedINI, std::string const& detectorName):
 					numPhiBins_centralBand(Read_numPhiBins_central(parsedINI, detectorName, "5 deg")), // 0.087 rad
 					squareWidth((2.*M_PI)/double(numPhiBins_centralBand)),
@@ -97,6 +100,26 @@ class ArrogantDetector
 		
 		//! @brief Convert absolute polar angle |t| to \f$ |\theta| = |\arctan(|p_L|/p_T)| \f$
 		virtual double ToAbsTheta(double const absPolarAngle) const = 0;
+		
+		//! @brief Convert etaMax to polar angle |t|
+		virtual double EtaMaxToPolarMax(double const etaMax) const;
+		
+		//! @brief Get the number of tower bands (which is one larger than the maximum polarIndex)
+		virtual towerID_t NumTowerBands() const;
+		
+		//! @brief Get the polar index of the band of towers
+		virtual towerID_t GetPolarIndex(double const absPolarAngle) const;
+		
+		//! @brief Get the phi index of the tower
+		virtual towerID_t GetPhiIndex(double phi, towerID_t const polarIndex) const;
+		
+		//! @brief Given a particle's angular position, obtain its polar and phi indices
+		virtual std::pair<towerID_t, towerID_t> GetIndices_PolarPhi
+			(double const absPolarAngle, double const phi) const;
+			
+		//! @brief Given a tower's ID, obtain its polar and phi indices
+		virtual std::pair<towerID_t, towerID_t> GetIndices_PolarPhi
+			(towerID_t const towerID) const;
 		
 		/*! @brief The towerID, based upon a particle's coordinates in the forward detector.
 		 *  
@@ -122,18 +145,27 @@ class ArrogantDetector
 		*/ 
 		virtual towerID_t GetTowerID(double const absPolarAngle, double const phi) const;
 		
+		/*! @brief Return the location of the tower's edges in theta/phi (theta_left, theta_right, phi_left, phi_right); 
+		 *  
+		 *  \warning deltaPolar = settings.squareWidth != deltaTheta
+		*/ 
+		virtual std::array<double, 4> GetTowerEdges(towerID_t const towerID) const;
+				
 		/*! @brief Return the unit position vector at the center of this tower.
 		 *  
 		 *  The default assumes the same binning scheme as the default GetTowerID(), 
 		 *  so only positions in the forward half of the detector are returned.
 		 */ 
-		virtual vec3_t GetTowerCenter(towerID_t const towerID) const;
+		virtual vec3_t GetTowerCenter(towerID_t const towerID) const;		
 				
 		/*! @brief Return the width of the phi bins in a polar belt.
 		 * 
 		 *  @param polarIndex The index of the calorimeter belt used in GetTowerID().
 		 */
 		virtual double PhiWidth(towerID_t const polarIndex) const = 0;
+		
+		//! @brief Get the number of phi bins in a given band
+		virtual towerID_t NumPhiBins(towerID_t const polarIndex) const = 0;
 		
 		/*! @brief Deal with missing energy after filling tracks and towers
 		 *  (and adding them all to \p visibleP3).
@@ -161,6 +193,9 @@ class ArrogantDetector
 		 *  @note This \em must be called by the derived class ctor, so it can use virtual functions.
 		*/
 		virtual void Init_inDerivedCTOR();
+		
+		//! @brief After all initialization, do some sanity checks
+		virtual void SanityCheck_inDerivedCTOR();
 		
 		ArrogantDetector::Settings settings; //!< @brief Settings read by the ctor.		
 				
@@ -204,7 +239,8 @@ class ArrogantDetector
 		ArrogantDetector(QSettings const& parsedINI, 
 			std::string const& detectorName = "detector"):
 		settings(parsedINI, detectorName), clearME(true) {}
-		virtual ~ArrogantDetector() {}
+		
+		virtual ~ArrogantDetector();
 		
 		void Clear();
 		
@@ -252,6 +288,8 @@ class ArrogantDetector
 			std::vector<vec4_t> const& chargedVec = std::vector<vec4_t>(), 
 			std::vector<vec4_t> const& invisibleVec = std::vector<vec4_t>(), 
 			std::vector<vec4_t> const& pileupVec = std::vector<vec4_t>());
+			
+		std::vector<std::pair<std::array<double, 4>, double>> AllVisibleAsTowers();
 		
 		/*! @brief Read "detectorName/type" and return 
 		 *  a new detector of that type for which the user becomes reponsigble.
@@ -286,13 +324,16 @@ class ArrogantDetector_Lepton : public ArrogantDetector
 		//! @brief Read the width of phi bins from the pre-constructed cache.
 		virtual double PhiWidth(towerID_t const thetaIndex) const;
 		
+		virtual towerID_t NumPhiBins(towerID_t const thetaIndex) const;
+		
 	private:
 		// Each theta belt has a different number of phi bins, to maintain dOmega.
 		// To implement the bijective towerID mapping quickly, 
 		// we store the dPhi for each theta belt.
-		std::vector<double> phiWidth; 
+		std::vector<double> phiWidth;
+		std::vector<towerID_t> numPhiBins;
 		
-		void Init_phiWidth(); // Set up phiWidth
+		void Init_phiWidth(); // Set up phiWidth and numPhiBins
 		
 	public:
 		ArrogantDetector_Lepton(QSettings const& parsedINI, 
@@ -301,8 +342,10 @@ class ArrogantDetector_Lepton : public ArrogantDetector
 		{
 			Init_inDerivedCTOR();
 			Init_phiWidth();
+			SanityCheck_inDerivedCTOR();	
 		}
-		virtual ~ArrogantDetector_Lepton() {}
+		
+		virtual ~ArrogantDetector_Lepton();
 };
 
 /*! @brief An ArrogantDetector at a hadron collider.
@@ -320,7 +363,11 @@ class ArrogantDetector_Hadron : public ArrogantDetector
 		virtual double ToAbsTheta(double const absEta) const;
 		
 		//! @brief \a phi bins have constant width \p squareWidth
-		virtual double PhiWidth(towerID_t const thetaIndex) const {return settings.squareWidth;}
+		virtual double PhiWidth(towerID_t const thetaIndex) const 
+			{return settings.squareWidth;}
+		
+		virtual towerID_t NumPhiBins(towerID_t const thetaIndex) const 
+			{return settings.numPhiBins_centralBand;}
 		
 	public:
 		ArrogantDetector_Hadron(QSettings const& parsedINI, 
@@ -328,6 +375,7 @@ class ArrogantDetector_Hadron : public ArrogantDetector
 		ArrogantDetector(parsedINI, detectorName)
 		{
 			Init_inDerivedCTOR();
+			SanityCheck_inDerivedCTOR();
 		}
 		virtual ~ArrogantDetector_Hadron() {}
 };

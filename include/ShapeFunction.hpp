@@ -2,50 +2,60 @@
 #define SHAPE_FUNCTION
 
 #include "kdp/kdpTools.hpp"
-#include "SpectralPower.hpp"
+#include "PowerJets.hpp"
 #include "RecursiveLegendre.hpp"
 
+//! @brief Caches onAxis coefficients for an extensive object
 class ShapeFunction
 {
 	public:
 		using real_t = PowerJets::real_t;
+		using vec3_t = PowerJets::vec3_t;
+		using vec4_t = PowerJets::vec4_t;
 		
 	protected:
 		mutable std::vector<real_t> onAxis;
 	
 		virtual void Fill_OnAxis(size_t const lMax) const = 0;
 	
-	public:		
-		/*! @brief Get the vector of on-axis coefficients for l=0 to l=lMax
+	public:
+		virtual ~ShapeFunction() {}
+	
+		/*! @brief Get the vector of on-axis coefficients for l=1 to l=lMax
 		 *  
-		 *  @warning This returned vector is guarenteed to be <em> as long <\em>
+		 *  @warning This returned vector is guaranteed to be <em> as long <\em>
 		 *  as \p lMax, but can be longer. It may also grow in size after you obtain it, 
 		 *  but will never shrink.
 		 */
 		std::vector<real_t> const& OnAxis(size_t const lMax) const;
 };
 
+//! @brief A particle uniformly distributed across a circular cap of solid angle Omega = surfaceFraction * 4 Pi
 class h_Cap : public ShapeFunction
 {
 	protected:
 		real_t twiceSurfaceFraction;
 		
 		void Fill_OnAxis(size_t const lMax) const;
-		mutable RecursiveLegendre<real_t, 1> Pl_computer;
+		mutable RecursiveLegendre<real_t> Pl_computer;
 			
 	public:
 		h_Cap(real_t const surfaceFraction);
 };
 
+/*! A shape function with an unstable recursion that can be 
+ *  corrected by extrapolating its ratio. The extrapolation begins when 
+ *  hl drops below the threshold.
+*/
 class h_Unstable : public ShapeFunction
 {
 	protected:
 		mutable size_t l;
 		mutable real_t lPlus1, twoLplus1;
-		real_t threshold;
+		mutable real_t R_last;
 		mutable bool stable;
 			
-		virtual real_t h_1() const = 0;
+		virtual void Setup(size_t const lMax) const = 0;
 		//! @brief The ratio of h_l / h_(l-1), to be used once h_l < threshold 
 		virtual real_t Asym_Ratio() const = 0;
 		virtual real_t NotIsotropic() const = 0;
@@ -55,11 +65,15 @@ class h_Unstable : public ShapeFunction
 		
 		void Reset(size_t const lMax) const;
 		
-		h_Unstable(real_t const threshold_in);
+		h_Unstable();
 	
 		void Fill_OnAxis(size_t const lMax) const;
+		
+	public:
+		virtual ~h_Unstable() {}
 };
 
+//! @brief A particle distributed by a pseudo-Gaussian.
 class h_Gaussian : public h_Unstable
 {
 	private:
@@ -67,29 +81,49 @@ class h_Gaussian : public h_Unstable
 		real_t lambda2;
 	
 	protected:
-		real_t h_1() const;		
+		void Setup(size_t const lMax) const;		
 		real_t Asym_Ratio() const;	
 		real_t NotIsotropic() const;		
 		void h_lp1() const;
 		
 	public:
-		h_Gaussian(real_t const lambda_in, real_t threshold_in = 1e-6);
+		h_Gaussian(real_t const lambda_in);
 };
 
+//! @brief A scalar decay boosted into the lab frame.
 class h_Boost : public h_Unstable
+{
+	private:
+		real_t m2, p2, beta;
+	
+	protected:
+		void Setup(size_t const lMax) const;		
+		real_t Asym_Ratio() const;	
+		real_t NotIsotropic() const;		
+		void h_lp1() const;
+		
+	public:
+		h_Boost(vec3_t const& p3, real_t const mass);
+};
+
+
+//! @brief A scalar decay boosted into the lab frame, 
+//  but forgetting to account for the energy transformation
+class h_Boost_orig : public h_Unstable
 {
 	private:
 		real_t beta;
 	
 	protected:
-		real_t h_1() const;		
+		void Setup(size_t const lMax) const;		
 		real_t Asym_Ratio() const;	
 		real_t NotIsotropic() const;		
 		void h_lp1() const;
 		
 	public:
-		h_Boost(real_t const beta_in, real_t threshold_in = 1e-6);
+		h_Boost_orig(vec3_t const& p3, real_t const mass);
 };
+
 
 		
 //~ //! @brief The recursive half-power of the particle smeared in Gaussian angle for l=0 to l=lMax

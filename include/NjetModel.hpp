@@ -31,8 +31,8 @@
 struct Jet
 {
 	using real_t = PowerJets::real_t;
-	using vec3_t = kdp::Vector3<real_t>; //!< @brief The 3-vector type
-	using vec4_t = kdp::Vector4<real_t>; //!< @brief The 4-vector type
+	using vec3_t = PowerJets::vec3_t; //!< @brief The 3-vector type
+	using vec4_t = PowerJets::vec4_t; //!< @brief The 4-vector type
 	
 	vec4_t p4; //!> @brief The 4-momentum
 	
@@ -113,17 +113,17 @@ class ShapedJet : public Jet
 		void SampleShape(incrementArray_t& z_lab, incrementArray_t& y_lab, 
 			pqRand::engine& gen) const;
 		
-		ShapedJet(): Jet(), shape(real_t(0)) {} // A minimal nullary constructor so Cython can use push_back
+		ShapedJet(): Jet(), shape(p4.p(), mass) {} // A minimal nullary constructor so Cython can use push_back
 				
 		// The don't initialize constructor
-		explicit ShapedJet(bool): Jet(false), shape(real_t(0)) {}
+		explicit ShapedJet(bool): Jet(false), shape(p4.p(), mass) {}
 		
 		ShapedJet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type,
 			std::vector<bool> address_in = std::vector<bool>(),
 			std::vector<real_t> const& shapeParams = {}):
-			Jet(p3_in, w0, w0type),
-			address(std::move(address_in)),
-			shape(vec4_t::BetaFrom_Mass_pSquared(mass, p4.p().Mag2())) {}
+		Jet(p3_in, w0, w0type),
+		address(std::move(address_in)),
+		shape(p4.p(), mass) {}
 				
 		// The interface we expect to use from inside a Cython loop
 		ShapedJet(real_t const x1, real_t const x2, real_t const x3, 
@@ -132,7 +132,7 @@ class ShapedJet : public Jet
 			std::vector<real_t> const& shapeParams = {}):
 		Jet(x1, x2, x3, w0, w0type),
 		address(std::move(address_in)),
-		shape(vec4_t::BetaFrom_Mass_pSquared(mass, p4.p().Mag2())) {}
+		shape(p4.p(), mass) {}
 		
 		// We assume that the shape of the jet will be initialized later, 
 		// after the jet's 4-vector and mass have been defined.
@@ -323,7 +323,8 @@ class ShowerParticle : public ShapedJet
 		 *  	\p addresses = {addr_1, ..., addr_i, ...} 	
 		*/ 
 		ShowerParticle(std::vector<real_t> const& params, 
-			std::vector<std::vector<bool>> const& addresses = {});
+			std::vector<std::vector<bool>> const& addresses = {}, 
+			bool const orientation = false);
 			
 		// Delete the copy assigment 
 		ShowerParticle& operator=(ShowerParticle const& orig) = delete;
