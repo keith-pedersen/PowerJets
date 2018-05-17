@@ -1,7 +1,7 @@
 #ifndef N_JET_MODEL
 #define N_JET_MODEL
 
-#include "SpectralPower.hpp"
+#include "PowerJets.hpp"
 #include "RecursiveLegendre.hpp"
 #include "pqRand/pqRand.hpp"
 //~ #include "ArrogantDetector.hpp"
@@ -81,7 +81,7 @@ class ShapedJet : public Jet
 	public:
 		//! @brief The address of the jet in the splitting tree.
 		std::vector<bool> address;
-		h_Boost shape;
+		mutable h_Boost shape;
 		
 		using Jet::Rotate;		
 	
@@ -91,13 +91,15 @@ class ShapedJet : public Jet
 		
 		// We assume that all shape parameters will be passed from a std::vector<real_t>
 		using param_iter_t = std::vector<real_t>::const_iterator;
-						
+		
+			GCC_IGNORE(-Wunused-parameter)
 		/*! @brief The azimuthally symmetric jet shape function.
 		 *
 		 *  A normalized PDF for \p z_CM = cos(theta_CM), the CM-frame polar angle
 		 *  (with the +z direction defined by jet's lab-frame 3-momentum).
 		*/
 		real_t h_CM(real_t const z_CM) const {return real_t(0.5);}
+			GCC_IGNORE_END
 		
 		/*! @brief Randomly sample the jet's shape in the lab frame, via unit vectors.
 		 * 
@@ -113,11 +115,14 @@ class ShapedJet : public Jet
 		void SampleShape(incrementArray_t& z_lab, incrementArray_t& y_lab, 
 			pqRand::engine& gen) const;
 		
-		ShapedJet(): Jet(), shape(p4.p(), mass) {} // A minimal nullary constructor so Cython can use push_back
+		ShapedJet(): Jet(), shape(p4.p(), real_t(1)) {} // A minimal nullary constructor so Cython can use push_back
+		
+		~ShapedJet() {}
 				
 		// The don't initialize constructor
-		explicit ShapedJet(bool): Jet(false), shape(p4.p(), mass) {}
+		explicit ShapedJet(bool): Jet(false), shape(p4.p(), real_t(1)) {}
 		
+			GCC_IGNORE(-Wunused-parameter)
 		ShapedJet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type,
 			std::vector<bool> address_in = std::vector<bool>(),
 			std::vector<real_t> const& shapeParams = {}):
@@ -133,12 +138,13 @@ class ShapedJet : public Jet
 		Jet(x1, x2, x3, w0, w0type),
 		address(std::move(address_in)),
 		shape(p4.p(), mass) {}
+			GCC_IGNORE_END
 		
 		// We assume that the shape of the jet will be initialized later, 
 		// after the jet's 4-vector and mass have been defined.
 		void SetShape(param_iter_t const shapeParam_begin, param_iter_t const shapeParam_end);
 		
-		std::vector<real_t> OnAxis(size_t const lMax) const {return shape.OnAxis(lMax);}
+		std::vector<real_t> OnAxis(size_t const lMax) const {return shape.hl_Vec(lMax);}
 		
 		// cython does not support
 		//~ static bool Sort_by_Mass(ShapedJet const& left, ShapedJet const& right)
@@ -148,6 +154,8 @@ class ShapedJet : public Jet
 		
 		bool operator < (ShapedJet const& that) const;
 };
+
+GCC_IGNORE(-Wpadded)
 
 // This class is a C++ implementation of particleJet_mk3.py
 
@@ -374,6 +382,8 @@ class ShowerParticle : public ShapedJet
 		real_t Total_absElost(real_t const absElost_in = real_t(0));
 };
 
+GCC_IGNORE_END
+
 /*! @brief Calculate the spectral power H_l for an n-jet model.
  * 
  *  H_l is calculated from the coefficients rho_l^m when the 
@@ -412,87 +422,87 @@ class ShowerParticle : public ShapedJet
  *  Hence, because the Monte Carlo integration is totally general, 
  *  we use it even for the trivial jet shape.
 */
-class NjetModel
-{
-	public:
-		using vec3_t = Jet::vec3_t;
-		using vec4_t = Jet::vec4_t;
-		using real_t = Jet::real_t;
-		//~ typedef SpectralPower::PhatF PhatF;
+//~ class NjetModel
+//~ {
+	//~ public:
+		//~ using vec3_t = Jet::vec3_t;
+		//~ using vec4_t = Jet::vec4_t;
+		//~ using real_t = Jet::real_t;
+		//~ // typedef SpectralPower::PhatF PhatF;
 		
-		class JetParticle_Cache
-		{
-			friend class NjetModel;
+		//~ class JetParticle_Cache
+		//~ {
+			//~ friend class NjetModel;
 			
-			std::vector<ShapedJet> jetVec;
-			std::vector<std::vector<real_t>> rho_jet;				
+			//~ std::vector<ShapedJet> jetVec;
+			//~ std::vector<std::vector<real_t>> rho_jet;				
 			
-			JetParticle_Cache(NjetModel const& modeler,
-				std::vector<ShapedJet> const& jetVec_in,
-				size_t const lMax, real_t const jetShapeGranularity);
+			//~ JetParticle_Cache(NjetModel const& modeler,
+				//~ std::vector<ShapedJet> const& jetVec_in,
+				//~ size_t const lMax, real_t const jetShapeGranularity);
 				
-			public:
-				JetParticle_Cache() {} //! @brief a public nullary ctor for Cython
-				size_t lMax() const {return rho_jet.front().size();}
-		};
+			//~ public:
+				//~ JetParticle_Cache() {} //! @brief a public nullary ctor for Cython
+				//~ size_t lMax() const {return rho_jet.front().size();}
+		//~ };
 	
-	private:
-		mutable pqRand::engine gen;
+	//~ private:
+		//~ mutable pqRand::engine gen;
 		
-		//! @brief Do the work in the i-loop of H_l
-		static std::vector<std::vector<real_t>> DoIncrements_jet_i(
-			size_t const i, size_t const lMax,
-			std::vector<ShapedJet> const& jetVec,
-			//~ kdp::MutexCount<size_t>& kShared, 
-			size_t const numIncrements,
-			std::string const& generator_seed, 
-			bool const onlySelf);
+		//~ //! @brief Do the work in the i-loop of H_l
+		//~ static std::vector<std::vector<real_t>> DoIncrements_jet_i(
+			//~ size_t const i, size_t const lMax,
+			//~ std::vector<ShapedJet> const& jetVec,
+			//~ //kdp::MutexCount<size_t>& kShared, 
+			//~ size_t const numIncrements,
+			//~ std::string const& generator_seed, 
+			//~ bool const onlySelf);
 			
-		std::vector<std::vector<real_t>> rho_j_l(
-			size_t const i, size_t const lMax,
-			real_t const jetShapeGranularity, real_t const Etot,
-			std::vector<ShapedJet> const& jetVec_sorted,
-			bool const onlySelf) const;
+		//~ std::vector<std::vector<real_t>> rho_j_l(
+			//~ size_t const i, size_t const lMax,
+			//~ real_t const jetShapeGranularity, real_t const Etot,
+			//~ std::vector<ShapedJet> const& jetVec_sorted,
+			//~ bool const onlySelf) const;
 			
-		static std::vector<ShapedJet> SortBy_E(std::vector<ShapedJet>);
-		static real_t Total_E(std::vector<ShapedJet>);
+		//~ static std::vector<ShapedJet> SortBy_E(std::vector<ShapedJet>);
+		//~ static real_t Total_E(std::vector<ShapedJet>);
 		
-	public:
-		NjetModel(QSettings const& settings);
-		NjetModel(std::string const& iniFileName = "NjetModel.conf");
-		NjetModel();
-		~NjetModel();
+	//~ public:
+		//~ NjetModel(QSettings const& settings);
+		//~ NjetModel(std::string const& iniFileName = "NjetModel.conf");
+		//~ NjetModel();
+		//~ ~NjetModel();
 		
-		JetParticle_Cache Make_JetParticle_Cache(std::vector<ShapedJet> const& jetVec,
-				size_t const lMax, real_t const jetShapeGranularity) const;
+		//~ JetParticle_Cache Make_JetParticle_Cache(std::vector<ShapedJet> const& jetVec,
+				//~ size_t const lMax, real_t const jetShapeGranularity) const;
 		
-		/*! @brief Given a vector of jets (in random order), 
-		 *  return H_l from (l = 1) to (l = lMax).
-		 * 
-		 *  \param lMax 	the maximum \p returned
-		 *  \param jetShapeGranularity	approximately how many random numbers will be drawn  
-		*/ 
-		std::vector<real_t> H_l(std::vector<ShapedJet> const& jetVec_unsorted, 
-			size_t const lMax, real_t const jetShapeGranularity) const;
+		//~ /*! @brief Given a vector of jets (in random order), 
+		 //~ *  return H_l from (l = 1) to (l = lMax).
+		 //~ * 
+		 //~ *  \param lMax 	the maximum \p returned
+		 //~ *  \param jetShapeGranularity	approximately how many random numbers will be drawn  
+		//~ */ 
+		//~ std::vector<real_t> H_l(std::vector<ShapedJet> const& jetVec_unsorted, 
+			//~ size_t const lMax, real_t const jetShapeGranularity) const;
 		
-		// The power spectrum from multiplying rho_jets * rho_particles	
-		std::vector<real_t> H_l_JetParticle(JetParticle_Cache const& cache, 
-			std::vector<SpectralPower::PhatF> const& particles, 
-			vec3_t const& axis, real_t const angle) const;
+		//~ // The power spectrum from multiplying rho_jets * rho_particles	
+		//~ std::vector<real_t> H_l_JetParticle(JetParticle_Cache const& cache, 
+			//~ std::vector<SpectralPower::PhatF> const& particles, 
+			//~ vec3_t const& axis, real_t const angle) const;
 			
-		static std::pair<real_t, real_t> CosSin(vec3_t const&, vec3_t const&);
+		//~ static std::pair<real_t, real_t> CosSin(vec3_t const&, vec3_t const&);
 					
-		//~ static std::vector<vec4_t> GetJets(std::vector<real_t> const& jetParams);
-		//~ static std::vector<std::vector<real_t>> GetJetsPy(std::vector<real_t> const& jetParams);
+		//~ // static std::vector<vec4_t> GetJets(std::vector<real_t> const& jetParams);
+		//~ // static std::vector<std::vector<real_t>> GetJetsPy(std::vector<real_t> const& jetParams);
 				
-		//~ // Draw a unit vector isotropically from the unit sphere
-		//~ static vec3_t IsoVec3(pqRand::engine& gen);
+		//~ // // Draw a unit vector isotropically from the unit sphere
+		//~ // static vec3_t IsoVec3(pqRand::engine& gen);
 
-		//~ // Return n_request unit 3-vectors randomly but isotropically distributed, 
-		//~ // but which nonetheless sum to zero. Due to the balancing scheme, 
-		//~ // the number of vectors returned may occasionally be (n_request + 1)
-		//~ static std::vector<kdp::Vec3> IsoCM(size_t const n_request, 
-			//~ pqRand::engine& gen, real_t const tolerance = 1e-15);
-};
+		//~ // // Return n_request unit 3-vectors randomly but isotropically distributed, 
+		//~ // // but which nonetheless sum to zero. Due to the balancing scheme, 
+		//~ // // the number of vectors returned may occasionally be (n_request + 1)
+		//~ // static std::vector<kdp::Vec3> IsoCM(size_t const n_request, 
+			//~ // pqRand::engine& gen, real_t const tolerance = 1e-15);
+//~ };
 
 #endif

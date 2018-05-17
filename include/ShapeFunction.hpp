@@ -1,11 +1,22 @@
 #ifndef SHAPE_FUNCTION
 #define SHAPE_FUNCTION
 
-#include "kdp/kdpTools.hpp"
 #include "PowerJets.hpp"
 #include "RecursiveLegendre.hpp"
+#include "kdp/kdpTools.hpp"
 
-//! @brief Caches onAxis coefficients for an extensive object
+GCC_IGNORE(-Wpadded)
+
+/*! @brief Calculate the on-axis coefficient for the particle shape function.
+ * 
+ *  The ShapeFunction is a state machine whose state (l) is mutable. 
+ *  This property is useful because, while a user may be able to change the state, 
+ *  they cannot alter the answer they will get. Hence, calling hl(23)
+ *  is equivalent to looking up the value hl_Vec[22], just without 
+ *  explicitly storing the vector.
+ * 
+ *  @warning ShapeFunction is not thread safe
+*/ 
 class ShapeFunction
 {
 	public:
@@ -14,33 +25,48 @@ class ShapeFunction
 		using vec4_t = PowerJets::vec4_t;
 		
 	protected:
-		mutable std::vector<real_t> onAxis;
-	
-		virtual void Fill_OnAxis(size_t const lMax) const = 0;
-	
+		mutable real_t hl_current;
+		mutable size_t l_current;
+		mutable real_t twoLplus1;
+		std::vector<real_t> hl_init; // The first few coefficients. Filled by derived ctor and possibly reused by Reset
+		
+		virtual void Reset() const = 0; // Called to reset recursion. MUST be called by derived ctor
+		virtual void Next() const = 0; // Increment l and store h_l in hl_current
+		void Increment_l() const;
+		void Set_l(size_t const l) const;
+		
+		ShapeFunction();
+				
 	public:
 		virtual ~ShapeFunction() {}
 	
-		/*! @brief Get the vector of on-axis coefficients for l=1 to l=lMax
-		 *  
-		 *  @warning This returned vector is guaranteed to be <em> as long <\em>
-		 *  as \p lMax, but can be longer. It may also grow in size after you obtain it, 
-		 *  but will never shrink.
-		 */
-		std::vector<real_t> const& OnAxis(size_t const lMax) const;
+		//! @brief Return h_l for the given l. Advance l if necessary
+		real_t hl(size_t const l) const;
+	
+		//! @brief Get the vector of on-axis coefficients for l=1 to l=lMax
+		std::vector<real_t> hl_Vec(size_t const lMax) const;
+		
+		virtual ShapeFunction* Clone() const = 0;
 };
 
-//! @brief A particle uniformly distributed across a circular cap of solid angle Omega = surfaceFraction * 4 Pi
+//! @brief A particle uniformly distributed across a 
+// circular cap of solid angle Omega = surfaceFraction * 4 Pi
 class h_Cap : public ShapeFunction
 {
 	protected:
-		real_t twiceSurfaceFraction;
-		
-		void Fill_OnAxis(size_t const lMax) const;
 		mutable RecursiveLegendre<real_t> Pl_computer;
+		real_t twiceSurfaceFraction;
+	
+		void Reset() const;
+		void Next() const;
 			
 	public:
 		h_Cap(real_t const surfaceFraction);
+		
+		ShapeFunction* Clone() const
+		{
+			return static_cast<ShapeFunction*>(new h_Cap(*this));
+		}		
 };
 
 /*! A shape function with an unstable recursion that can be 
@@ -50,24 +76,23 @@ class h_Cap : public ShapeFunction
 class h_Unstable : public ShapeFunction
 {
 	protected:
-		mutable size_t l;
-		mutable real_t lPlus1, twoLplus1;
-		mutable real_t R_last;
+		mutable real_t hl_last;
+		//~ real_t R_current;
 		mutable bool stable;
-			
-		virtual void Setup(size_t const lMax) const = 0;
+		
+		virtual void Reset() const;		
+		virtual void Next() const;
+		virtual void Setup() = 0;
+		
 		//! @brief The ratio of h_l / h_(l-1), to be used once h_l < threshold 
 		virtual real_t Asym_Ratio() const = 0;
-		virtual real_t NotIsotropic() const = 0;
-				
-		//! @brief Set the l + 1 element of coeff
-		virtual void h_lp1() const = 0;
+						
+		//! @brief Return the l + 1 coefficient
+		virtual real_t h_lp1() const = 0;
 		
-		void Reset(size_t const lMax) const;
+		virtual bool Isotropic() const = 0;
 		
-		h_Unstable();
-	
-		void Fill_OnAxis(size_t const lMax) const;
+		//h_Unstable();
 		
 	public:
 		virtual ~h_Unstable() {}
@@ -81,48 +106,64 @@ class h_Gaussian : public h_Unstable
 		real_t lambda2;
 	
 	protected:
-		void Setup(size_t const lMax) const;		
-		real_t Asym_Ratio() const;	
-		real_t NotIsotropic() const;		
-		void h_lp1() const;
+		void Setup();
+		
+		real_t Asym_Ratio() const;
+		real_t h_lp1() const;
+		bool Isotropic() const;
 		
 	public:
 		h_Gaussian(real_t const lambda_in);
+		
+		ShapeFunction* Clone() const
+		{
+			return static_cast<ShapeFunction*>(new h_Gaussian(*this));
+		}
 };
 
 //! @brief A scalar decay boosted into the lab frame.
 class h_Boost : public h_Unstable
 {
 	private:
-		real_t m2, p2, beta;
+		real_t m2;
+		real_t p2;
+		real_t beta;
 	
 	protected:
-		void Setup(size_t const lMax) const;		
-		real_t Asym_Ratio() const;	
-		real_t NotIsotropic() const;		
-		void h_lp1() const;
+		void Setup();
+		
+		real_t Asym_Ratio() const;
+		real_t h_lp1() const;
+		bool Isotropic() const;
 		
 	public:
 		h_Boost(vec3_t const& p3, real_t const mass);
+		
+		ShapeFunction* Clone() const
+		{
+			return static_cast<ShapeFunction*>(new h_Boost(*this));
+		}
 };
+
+GCC_IGNORE_END
 
 
 //! @brief A scalar decay boosted into the lab frame, 
 //  but forgetting to account for the energy transformation
-class h_Boost_orig : public h_Unstable
-{
-	private:
-		real_t beta;
+//~ class h_Boost_orig : public h_Unstable
+//~ {
+	//~ private:
+		//~ real_t beta;
 	
-	protected:
-		void Setup(size_t const lMax) const;		
-		real_t Asym_Ratio() const;	
-		real_t NotIsotropic() const;		
-		void h_lp1() const;
+	//~ protected:
+		//~ void Setup(size_t const lMax) const;		
+		//~ real_t Asym_Ratio() const;	
+		//~ real_t NotIsotropic() const;		
+		//~ void h_lp1() const;
 		
-	public:
-		h_Boost_orig(vec3_t const& p3, real_t const mass);
-};
+	//~ public:
+		//~ h_Boost_orig(vec3_t const& p3, real_t const mass);
+//~ };
 
 
 		

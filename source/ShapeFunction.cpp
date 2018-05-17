@@ -1,133 +1,217 @@
 #include "ShapeFunction.hpp"
 #include <iostream>
 
-std::vector<ShapeFunction::real_t> const& ShapeFunction::OnAxis(size_t const lMax) const
-{
-	if(onAxis.size() < lMax)
-		this->Fill_OnAxis(lMax);
+// To check that Reset is called, we can initialize l_current to a non-sensical value, 
+// then assert that l_current is sensible when hl is called
 
-	assert(onAxis.size() >= lMax);
+////////////////////////////////////////////////////////////////////////
+
+ShapeFunction::ShapeFunction():
+	l_current(size_t(-1)) {} // Initialize to nonsense value to enforce Reset() call by derived ctor (via assert in hl())
 	
-	return onAxis;
+////////////////////////////////////////////////////////////////////////
+
+ShapeFunction::real_t ShapeFunction::hl(size_t const l) const
+{
+	assert(l_current not_eq size_t(-1));
+	
+	if(l not_eq l_current)
+	{
+		if(l < l_current)
+		{
+			if(l == 0)
+				return real_t(1);
+			else if (l <= hl_init.size())
+			{
+				// hl_init stores hl at index = l - 1
+				return hl_init[l - 1];
+			}
+			else
+			{
+				// We assume that we will not be using these classes stupidly, 
+				// but we should probably build in something to test for too-frequent reset
+				Reset();
+			}
+		}
+		assert(l_current < l); // Sanity check; the control logic says we now need to call Next at least once
+	
+		//~ std::cout << "calculating...\n";
+	
+		do
+			Next();
+		while(l_current < l);
+	}
+	
+	return hl_current;
 }
 
+////////////////////////////////////////////////////////////////////////
+
+std::vector<ShapeFunction::real_t> ShapeFunction::hl_Vec(size_t const lMax) const
+{
+	// The whole point of this class is that resting and repeating the recursion is
+	// better than trying to cache it, so we will alter the state of this object
+	
+	std::vector<real_t> hl_vec;
+	hl_vec.reserve(lMax);
+	
+	// Use the implicit Reset inside hl
+	for(size_t l = 1; l <= lMax; ++l)
+		hl_vec.push_back(hl(l));
+		
+	return hl_vec;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void ShapeFunction::Increment_l() const
+{
+	++l_current;
+	twoLplus1 += real_t(2);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void ShapeFunction::Set_l(size_t const l) const
+{
+	l_current = l;
+	twoLplus1 = real_t(2*l_current + 1);
+}
+
+////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
 h_Cap::h_Cap(real_t const surfaceFraction):
-		twiceSurfaceFraction(real_t(2) * surfaceFraction)
+	twiceSurfaceFraction(real_t(2) * surfaceFraction)
 {
 	assert(surfaceFraction < 1);
+	Reset();
 }
 
-void h_Cap::Fill_OnAxis(size_t const lMax) const
+////////////////////////////////////////////////////////////////////////
+
+void h_Cap::Reset() const
 {
 	Pl_computer.Setup(real_t(1) - twiceSurfaceFraction);
-	onAxis.assign(lMax, 0.);
 	
-	// h_l     = (P_{l-1} - P_{l+1}) / (2 A_twr * (2l+1))
-	// h_{l-1} = (P_{l-2} - P_{l})   / (2 A_twr * (2l-1))
+	// h_l = (P_{l-1} - P_{l+1}) / (2 A_twr * (2l+1))
+	// RecursiveLegendre has access to l, l-1, and l-2, 
+	// so we must keep Pl_computer's l one ahead of l_current. 
+	// Since Pl_computer starts at l = 1, we can start with l_current = 0
+	Set_l(0);
 	
-	// The first l we want to set is l = 1, so we start at l = 2
+	hl_current = real_t(1);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void h_Cap::Next() const
+{
 	Pl_computer.Next();
-	assert(Pl_computer.l() == 2);
-			
-	real_t twolm1 = real_t(2*Pl_computer.l() - 1); // start with l = 0
-		
-	// We set an l that is one less than the l we keep Pl_computer at
-	// But we also don't want to set l=0, so we store it at lSet - 1
-	for(size_t lSet = 1; lSet <= lMax; ++lSet)
-	{
-		onAxis[lSet - 1] = (Pl_computer.P_lm2() - Pl_computer.P_l())/
-			(twolm1 * twiceSurfaceFraction);
-			
-		Pl_computer.Next();
-		twolm1 += real_t(2);
-	}
-	assert(onAxis.size() == lMax);
+	Increment_l();
+	
+	assert(Pl_computer.l() == (l_current + 1));
+	
+	// We need 2l + 1 for the new l
+	hl_current = (Pl_computer.P_lm2() - Pl_computer.P_l())/
+		(twoLplus1 * twiceSurfaceFraction);
 }
 	
 ////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
 		
-h_Unstable::h_Unstable():
-	R_last(real_t(1)) {}
-	
-void h_Unstable::Reset(size_t const lMax) const
+void h_Unstable::Reset() const
 {
-	onAxis.assign(lMax + 1, real_t(0)); // Fill with zeroes
-	
-	// Initialize
-	onAxis[0] = real_t(1);
-	R_last = real_t(1);
-	
-	Setup(lMax); // Set initial values, initialize l to the largest set value
-	assert(l >= 1);
-			
-	lPlus1 = real_t(l + 1);
-	twoLplus1 = real_t(2*l + 1); // 2*1 + 1
-	
+	//~ R_current = real_t(1);
 	stable = true;
+	
+	if(Isotropic())
+	{
+		Set_l(1);
+		hl_current = real_t(0);
+		hl_last = real_t(1);
+	}
+	else
+	{
+		assert(hl_init.size());
+		hl_current = hl_init.back();
+		hl_last = (hl_init.size() == 1) ? real_t(1) : hl_init[hl_init.size() - 2];
+		Set_l(hl_init.size());
+	}
 }
 
-void h_Unstable::Fill_OnAxis(size_t const lMax) const
-{
-	Reset(lMax);
+////////////////////////////////////////////////////////////////////////
 	
-	if(NotIsotropic()) // Otherwise, all zeroes after h_0
+void h_Unstable::Next() const
+{
+	if(Isotropic()) // All zeroes after h_0
 	{
-		while(l < lMax) // we set l+1
+		Increment_l();
+		assert(hl_current = real_t(0));
+	}
+	else
+	{
+		if(stable)
 		{
-			if(stable)
-			{
-				h_lp1(); // iterate
-				
-				real_t const R = onAxis[l+1] / onAxis[l];
-				
-				if((R < real_t(0)) or (R > R_last))
-				{
-					// Move back a little bit
-					l -= size_t(0.3*real_t(l));
-					assert(l >= 2);
-					lPlus1 = real_t(l + 1);
-					twoLplus1 = real_t(2*l + 1);
-				
-					stable = false;
-				}
-				else
-					R_last = R;
-			}
+			real_t const hl_next = h_lp1(); // iterate
 			
-			// This needs to be done after stable recursion, 
-			// but before unstable recursion, because h_l = R(l) * h_l-1
-			lPlus1 += real_t(1);
-			twoLplus1 += real_t(2);
-			++l;
+			if(hl_next < 1e-5) // It starts to get bad around 1e-8, so use a buffer
+				stable = false;
+						
+			// The less arbitrary instability detection does not work for on-the-fly recursion, 
+			// because hl for the previous iteration is still inaccurate, 
+			// but is not corrected.
 			
-			if(not stable)
+			//~ real_t const R_next = hl_next / hl_current;
+			
+			//~ if((R_next < real_t(0)) or (R_next > R_current)) // detect instability
+			//~ {
+				
+				
+				//~ // Reset and re-iterate to a smaller l that was stable
+				//~ size_t const l_stable = size_t(0.8*real_t(l_current));
+				//~ assert(l_stable >= 2);
+				
+				//~ // Now we use a little recursive trickery.
+				//~ // We do/set some things explicitly in case hl is using h_init
+				//~ Reset();
+				//~ hl_current = hl(l_stable);
+				//~ stable = false;
+				//~ // The do-while loop in hl() should ensure that Next() is called repeatedly, 
+				//~ // now using the unstable Asym_Ratio code, until l increments to where we want.
+			//~ }
+			else
 			{
-				onAxis[l] = Asym_Ratio() * onAxis[l-1];
-				if(onAxis[l] == real_t(0))
-					break;
+				hl_last = hl_current;
+				hl_current = hl_next;
+				//~ R_current = R_next;
 			}
 		}
+			
+		// This needs to be done after stable recursion,
+		// but before unstable recursion, because h_l = R(l) * h_l-1
+		Increment_l();
+		
+		if(not stable) // this is not an else so that we can flow from stable to unstable
+			hl_current *= Asym_Ratio();
 	}
-	
-	// We need h0 = 1 to do the recursion without a conditional branch,
-	// but now that we're done calculating, we don't want that h0 coefficient anymore
-	onAxis.erase(onAxis.begin());
-	assert(onAxis.size() == lMax);
 }
 
 ////////////////////////////////////////////////////////////////////////
 
 h_Gaussian::h_Gaussian(real_t const lambda_in):
-	h_Unstable(), 
 	lambda(lambda_in),
 	lambda2(kdp::Squared(lambda)) 
 {
 	assert(lambda > 0.);
+	
+	Setup();
+	Reset();
 }
 
-void h_Gaussian::Setup(size_t const lMax) const
+////////////////////////////////////////////////////////////////////////
+
+void h_Gaussian::Setup()
 {
 	// 1/tanh(1/lambda**2) = (1 + exp(-2/lambda**2))/(1 - exp(-2/lambda**2))
 	// (1 + exp(-x))/(1-exp(-x)) = 1 + 2*exp(-x)/(1-exp(-x) = 1 + 2/(exp(x)-1)
@@ -136,12 +220,12 @@ void h_Gaussian::Setup(size_t const lMax) const
 	// This occurs when lambda2 is about 0.5
 
 	if(lambda2 > real_t(0.5))
-		onAxis[1] = real_t(1)/std::tanh(real_t(1)/lambda2) - lambda2;
+		hl_init = {real_t(1)/std::tanh(real_t(1)/lambda2) - lambda2};
 	else
-		onAxis[1] = kdp::Diff2(real_t(1), lambda) + real_t(2)/std::expm1(real_t(2)/lambda2);
-		
-	l = 1;
+		hl_init = {kdp::Diff2(real_t(1), lambda) + real_t(2)/std::expm1(real_t(2)/lambda2)};
 }
+
+////////////////////////////////////////////////////////////////////////
 
 h_Gaussian::real_t h_Gaussian::Asym_Ratio() const
 {
@@ -149,16 +233,21 @@ h_Gaussian::real_t h_Gaussian::Asym_Ratio() const
 	return real_t(2)/(term + std::sqrt(kdp::Squared(term) + real_t(4)));				
 }
 
-h_Gaussian::real_t h_Gaussian::NotIsotropic() const
+////////////////////////////////////////////////////////////////////////
+
+bool h_Gaussian::Isotropic() const
 {
-	return (lambda < 1e3);
+	return (lambda > 1e3);
 }
 
-void h_Gaussian::h_lp1() const
+////////////////////////////////////////////////////////////////////////
+
+h_Gaussian::real_t h_Gaussian::h_lp1() const
 {
-	onAxis[l+1] = -twoLplus1*lambda2*onAxis[l] + onAxis[l-1];
+	return -twoLplus1 * lambda2 * hl_current + hl_last;
 }
 
+////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
 h_Boost::h_Boost(vec3_t const& p3, real_t const mass):
@@ -168,98 +257,102 @@ h_Boost::h_Boost(vec3_t const& p3, real_t const mass):
 {
 	assert(beta >= real_t(0));
 	assert(beta <= real_t(1));
-}
-
-void h_Boost::Setup(size_t const lMax) const
-{
-	if(beta == real_t(1))
-	{
-		// fill lMax + 1, because we erase the first element
-		onAxis.assign(lMax + 1, 1.);
-		l = lMax + 1;
-	}
-	else
-	{
-		real_t const term = std::sqrt((m2 + p2)*p2);
-		
-		onAxis[1] = beta;
-		
-		real_t const h2 = real_t(1) - (real_t(3) * m2)/(real_t(2) * p2) * 
-			(real_t(1) - real_t(0.5) * (m2 / term) * 
-			std::log1p(real_t(2) * (p2 + term) / m2));
-				
-		assert(h2 >= real_t(0));
-		assert(h2 < real_t(1));
-		
-		onAxis[2] = h2;
-		
-		l = 2;
-	}
-}
-
-h_Boost::real_t h_Boost::Asym_Ratio() const
-{
-	return real_t(2) * (lPlus1 + real_t(1)) * beta / 
-	(twoLplus1 + std::sqrt(kdp::Squared(twoLplus1) - 
-		real_t(4) * kdp::Squared(beta) * (real_t(l) - real_t(1)) * (real_t(l) + real_t(2))));
-}
-
-h_Boost::real_t h_Boost::NotIsotropic() const
-{
-	return (beta > 1e-6);
-}
-
-void h_Boost::h_lp1() const
-{
-	// This should be safe for all beta = 1. for sufficiently small l, 
-	// since the integers will be exactly represented
-	onAxis[l+1] = (twoLplus1*onAxis[l] - beta*(lPlus1 + real_t(1))*onAxis[l-1])/
-		(beta*(real_t(l) - real_t(1)));
+	
+	Setup();
+	Reset();
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-h_Boost_orig::h_Boost_orig(vec3_t const& p3, real_t const mass):
-	beta(vec4_t::BetaFrom_Mass_pSquared(mass, p3.Mag2()))
+void h_Boost::Setup()
 {
-	assert(beta >= real_t(0));
-	assert(beta <= real_t(1));
-}
-
-void h_Boost_orig::Setup(size_t const lMax) const
-{
-	if(beta == real_t(1))
-		onAxis[1] = real_t(1);
+	if(Isotropic())
+		hl_init = {beta, real_t(0)};
 	else
 	{
-		real_t const h1 = real_t(1) + ((real_t(1) - beta)/beta)*
-			(real_t(1) - (real_t(1) + beta)/beta * std::atanh(beta));
+		real_t const term = std::sqrt((m2 + p2)*p2);		
+		real_t const h2 = real_t(1) - (real_t(3) * m2)/(real_t(2) * p2) * 
+			(real_t(1) - real_t(0.5) * (m2 / term) * 
+			std::log1p(real_t(2) * (p2 + term) / m2));
+		//~ R_current = hl_current / hl_last;
 		
-		assert(h1 >= real_t(0));
-		assert(h1 < real_t(1));
+		assert(h2 >= real_t(0));
+		assert(h2 <= real_t(1));
 		
-		onAxis[1] = h1;
+		hl_init = {beta, h2};
 	}
+}
+
+////////////////////////////////////////////////////////////////////////
+
+h_Boost::real_t h_Boost::Asym_Ratio() const
+{
+	return real_t(2 * (l_current + 2)) * beta / 
+	(twoLplus1 + std::sqrt(kdp::Squared(twoLplus1) - 
+		real_t(4) * kdp::Squared(beta) * real_t((l_current - 1) * (l_current + 2))));
+}
+
+////////////////////////////////////////////////////////////////////////
+
+bool h_Boost::Isotropic() const
+{
+	// Zero-initiliazed ShapedJet
+	return (p2 == 0.) or (beta < 1e-5);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+h_Boost::real_t h_Boost::h_lp1() const
+{
+	// This should be safe for beta = 1. for sufficiently small l, 
+	// since the integers will be exactly represented
+	return (twoLplus1*hl_current - beta*(real_t(l_current + 2)*hl_last))/
+		(beta*(real_t(l_current - 1)));
+}
+
+////////////////////////////////////////////////////////////////////////
+
+//~ h_Boost_orig::h_Boost_orig(vec3_t const& p3, real_t const mass):
+	//~ beta(vec4_t::BetaFrom_Mass_pSquared(mass, p3.Mag2()))
+//~ {
+	//~ assert(beta >= real_t(0));
+	//~ assert(beta <= real_t(1));
+//~ }
+
+//~ void h_Boost_orig::Setup(size_t const lMax) const
+//~ {
+	//~ if(beta == real_t(1))
+		//~ onAxis[1] = real_t(1);
+	//~ else
+	//~ {
+		//~ real_t const h1 = real_t(1) + ((real_t(1) - beta)/beta)*
+			//~ (real_t(1) - (real_t(1) + beta)/beta * std::atanh(beta));
+		
+		//~ assert(h1 >= real_t(0));
+		//~ assert(h1 < real_t(1));
+		
+		//~ onAxis[1] = h1;
+	//~ }
 	
-	l=1;
-}
+	//~ l=1;
+//~ }
 
-h_Boost_orig::real_t h_Boost_orig::Asym_Ratio() const
-{
-	return real_t(2)*beta*lPlus1 / 
-	(twoLplus1 + std::sqrt(kdp::Squared(twoLplus1) -
-		kdp::Squared(real_t(2) * beta) * lPlus1*(lPlus1 - real_t(1))));
-}
+//~ h_Boost_orig::real_t h_Boost_orig::Asym_Ratio() const
+//~ {
+	//~ return real_t(2)*beta*lPlus1 / 
+	//~ (twoLplus1 + std::sqrt(kdp::Squared(twoLplus1) -
+		//~ kdp::Squared(real_t(2) * beta) * lPlus1*(lPlus1 - real_t(1))));
+//~ }
 
-h_Boost_orig::real_t h_Boost_orig::NotIsotropic() const
-{
-	return (beta > 1e-6);
-}
+//~ h_Boost_orig::real_t h_Boost_orig::NotIsotropic() const
+//~ {
+	//~ return (beta > 1e-6);
+//~ }
 
-void h_Boost_orig::h_lp1() const
-{
-	onAxis[l+1] = (twoLplus1*onAxis[l] - beta*lPlus1*onAxis[l-1])/(beta*(lPlus1 - real_t(1)));
-}
+//~ void h_Boost_orig::h_lp1() const
+//~ {
+	//~ onAxis[l+1] = (twoLplus1*onAxis[l] - beta*lPlus1*onAxis[l-1])/(beta*(lPlus1 - real_t(1)));
+//~ }
 		
 //~ //! @brief The recursive half-power of the particle smeared in Gaussian angle for l=0 to l=lMax
 //~ template <typename real_t>

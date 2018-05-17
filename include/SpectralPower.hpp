@@ -16,7 +16,9 @@
 #include "Pythia8/Event.h"
 #include <QtCore/QSettings>
 #include <mutex>
+#include <memory>
 
+class Jet;
 class ShapedJet;
 class ShapeFunction;
 
@@ -61,8 +63,9 @@ class ShapeFunction;
 class SpectralPower
 {
 	public:
-		typedef PowerJets::real_t real_t; //!< The floating point type
-		typedef kdp::Vector3<real_t> vec3_t; //!< The 3-vector type
+		using real_t = PowerJets::real_t;
+		using vec3_t = PowerJets::vec3_t; //!< @brief The 3-vector type
+		using vec4_t = PowerJets::vec4_t; //!< @brief The 4-vector type
 		
 		//! @brief A simple struct for storing individual particle information.
 		struct PhatF
@@ -70,53 +73,51 @@ class SpectralPower
 			vec3_t pHat; //!< @brief Unit-direction of travel.
 			real_t f; //!< @brief Energy fraction (versus total event energy).
 			
-			// This forces normalization			
-			PhatF(vec3_t const& p3):
-				pHat(p3), f(p3.Mag())
-			{
-				pHat /= f;
-			}		
+			//! @brief Construct from p3 (f=|p3>|), normalizing p3 
+			PhatF(vec3_t const& p3);
 			
-			/*! @brief Construct from a 3-vector and energy fraction
-			 *  
-			 *  @param p3	The incoming 3-vector
-			 *  @param f_in 	The incoming energy fraction
-			 *  @param normalize 	If true, normalize \p pHat after construction
-			 */ 
-			//~ PhatF(vec3_t const& p3, real_t const f_in, bool const normalize = true):
-				//~ pHat(p3), f(f_in)
-			//~ {
-				//~ if(normalize) pHat.Normalize();
-			//~ }
+			//! @brief Construct from p4 (f=p4.x0), normalizing p3 
+			PhatF(vec4_t const& p4);
+			
+			//! @brief Construct from p4 (f=p4.x0), normalizing p3 
+			PhatF(Jet const& jet);
 			
 			/*! @brief Construct from a 3-vector's components and energy fraction
 			 *  
 			 *  @param px,py,pz	The components of the 3-vec
 			 *  @param f_in 	The energy fraction
-			 *  @param normalize 	If true, normalize \p pHat after construction
 			 */ 
-			PhatF(real_t const px, real_t const py, real_t const pz, real_t f_in):
-			pHat(px, py, pz), f(f_in)
-			{
-				// Normalize to momentum, in case particle has small mass
-				pHat.Normalize();
-			}
+			PhatF(real_t const px, real_t const py, real_t const pz, real_t f_in);
 			
-			PhatF(Pythia8::Particle const& particle):
-				PhatF(particle.px(), particle.py(), particle.pz(), particle.e()) {}
+			//! @brief Construct from a Pythia particle (discarding mass, using energy only)
+			PhatF(Pythia8::Particle const& particle);
+			
+			//! @brief Construct a vector of PhatF, normalizing the total f of the collection
+			template<class T>
+			static std::vector<PhatF> To_PhatF_Vec(std::vector<T> const& originalVec)
+			{
+				std::vector<PhatF> convertedVec;
 				
-			//~ static std::vector<PhatF> To_PhatF_Vec(std::vector<Pythia8::Particle> const& original);
-			static std::vector<PhatF> To_PhatF_Vec(std::vector<vec3_t> const& original);
+				real_t totalE = real_t(0);
+				for(auto const& original : originalVec)
+				{
+					convertedVec.emplace_back(original);
+					totalE += convertedVec.back().f;
+				}
+				
+				for(auto& converted : convertedVec)
+					converted.f /= totalE;
+					
+				return convertedVec;
+			}
 		};
 
-		// 
-		
-		/*! @brief A collection of PhatF
+		/*! @brief A collection of PhatF (an object of vectors)
 		 * 
 		 *  When we take the outer products \f$ \hat{p}_i \cdot \hat{p}_j \f$
-		 *  and \f$ f_i f_j \f$, the class-of-vectors paradigm is much faster than the 
-		 *  vector-of-classes paradigm (std::vector<PhatF>), because the 
-		 *  class-of-vectors allows SIMD vectorization (via \ref TiledSelfOuterU).
+		 *  and \f$ f_i f_j \f$, the object-of-vectors paradigm is much faster than the 
+		 *  vector-of-objects paradigm (std::vector<PhatF>), because the 
+		 *  object-of-vectors allows SIMD vectorization of the scalar product.
 		 *  @note We deliberately emulate many of the functions of std::vector
 		*/ 
 		class PhatFvec
@@ -124,12 +125,16 @@ class SpectralPower
 			// Keep x,y,z,f hidden from everyone but SpectralPower
 			// (and any of its nested classes, which have the same friend rights as SpectralPower).
 			friend class SpectralPower;
+			friend class PowerSpectrum;
 			
 			private:
 				std::vector<real_t> x, y, z;
 				std::vector<real_t> f;
 			
 			public:
+				PhatFvec() {} //!< @brief Construct an empty PhatFvec.
+				~PhatFvec() {}
+				
 				/*! @brief Convert a std::vector<PhatF> into a PhatVec
 				 *  (vector-of-classes to class-of-vectors).
 				 * 
@@ -137,8 +142,7 @@ class SpectralPower
 				 *  @param normalize the pHat in the vector-of-classes
 				*/ 
 				PhatFvec(std::vector<PhatF> const& orig);
-				PhatFvec() {} //!< @brief Construct an empty PhatFvec.
-				
+								
 				// We can use implicit copy and move for ctors and assigment, 
 				// because x, y, z, and f all have them defined.
 				
@@ -148,17 +152,47 @@ class SpectralPower
 				
 				void emplace_back(PhatF const& pHatF);
 				
-				//! @brief emplace back, with auto-normalization.
-				//~ void emplace_back(vec3_t const& pHat, real_t const f_in, 
-					//~ bool const normalize = true);
-				
-				//~ static constexpr size_t tileWidth = 32;
-				//~ // Calculate and set |p>.<p| and |f>*<f| from the values contained,
-				//~ // using row-major format for the upper half (TiledSymmetricUpperU)
-				//~ void OuterProduct(std::vector<real_t>& pDot, std::vector<real_t>& fProd) const;
+				// Less versatile than insert, but there's no need to define iterators
+				void append(PhatFvec const& tail);
 				
 				//! @brief Join two PhatFvec returned by separate function calls
 				static PhatFvec Join(PhatFvec&& first, PhatFvec&& second);
+		};
+		
+		class ShapedParticleContainer : public PhatFvec
+		{
+			friend class PowerSpectrum;
+			
+			private:
+				/* There are three cases for shapes in the container: 
+				 * 1. Every particle has the same shape (i.e. tracks)
+				 * 2. Sets of adjacent particles have the same shape (i.e. towers in a 
+				 * calorimeter whose bands do not have identical solid angle, as in a hadronic calorimeter)
+				 * 3. Every particle has unique shape.
+				 * 
+				 * We now define a system which is efficient for all three.
+				 * 
+				 * We keep all shapes in shape_store, copying any incoming shape.
+				 * + For case 1, we store only one shape in shape_store.
+				 * + For case 2 and 3, we keep a vector of iterators to shapes,
+				 *   one for each particle, which allows multiple particles to
+				 *   point to the same shape. This reduces 
+				 *   redundant calculation of hl during recursion.
+				 * Storing the shapes in shape_store improves cache efficiency, 
+				 * since adjacent particles will have adjacent shapes.
+				*/
+				std::vector<ShapeFunction*> shapeStore; // The pointers which need deleting
+				std::vector<ShapeFunction*> shapeVec;
+				//~ std::vector<decltype(shape_store::iterator)> shape;
+				
+			public:
+				ShapedParticleContainer(std::vector<ShapedJet> const& jets);
+			
+				ShapedParticleContainer(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape);
+				
+				~ShapedParticleContainer();
+				
+				void append(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape);
 		};
 		
 		/*! @brief A thread-safe object for generating increments of the
@@ -223,12 +257,13 @@ class SpectralPower
 					std::array<real_t, incrementSize>& fProd_incr);
 		};
 		
+		GCC_IGNORE(-Wpadded)
 		/*! @brief A settings container for PowerSpectrum
 		 * 
 		 *  Settings are read from a QSettings object (a parsed INI file),
 		 *  where the INI file contains settings of the format "power/variable" 
 		 *  (where "variable" is the name of the Settings class member).
-		*/  
+		*/
 		struct Settings
 		{
 			size_t maxThreads; //!< Max number of worker threads to use.
@@ -245,6 +280,7 @@ class SpectralPower
 				lFactor(parsedINI.value("power/lFactor", false).toBool()),
 				nFactor(parsedINI.value("power/nFactor", false).toBool()) {}
 		};
+		GCC_IGNORE_END
 		
 	private:
 		Outer_Increment outer; // Manages the generation of SOP increments.
@@ -299,19 +335,19 @@ class SpectralPower
 			size_t const numThreads_requested = 0); // If zero, defer to internal settings
 			
 		static std::vector<real_t> Hl_Obs(size_t const lMax,
-			std::vector<PhatF> const& particles, ShapeFunction const& particleShape);
+			std::vector<PhatF> const& particles, ShapeFunction& particleShape);
 			
 		static std::vector<real_t> Hl_Obs(size_t const lMax,
-			std::vector<PhatF> const& tracks, ShapeFunction const& trackShape, 
-			std::vector<PhatF> const& towers, ShapeFunction const& towerShape);
+			std::vector<PhatF> const& tracks, ShapeFunction& trackShape, 
+			std::vector<PhatF> const& towers, ShapeFunction& towerShape);
 		
 		static std::vector<real_t> Hl_Jet(size_t const lMax, 
 			std::vector<ShapedJet> const& jets, std::vector<real_t> const& hl_onAxis_Filter);
 		
 		static std::vector<real_t> Hl_Hybrid(size_t const lMax,
 			std::vector<ShapedJet> const& jets, std::vector<real_t> const& hl_onAxis_Filter,
-			std::vector<PhatF> const& tracks, ShapeFunction const& trackShape,
-			std::vector<PhatF> const& towers, ShapeFunction const& towerShape,
+			std::vector<PhatF> const& tracks, ShapeFunction& trackShape,
+			std::vector<PhatF> const& towers, ShapeFunction& towerShape,
 			std::vector<real_t> const& Hl_Obs_in = std::vector<real_t>());
 				
 		void Write_Hl_toFile(std::string const& filePath,

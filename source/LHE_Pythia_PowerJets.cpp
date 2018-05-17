@@ -28,12 +28,13 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(QSettings const& parsedINI):
 	detector(ArrogantDetector::NewDetector(parsedINI, "detector")),
 		// The detector's parameters are read from the INI folder [detector]
 	clusterAlg(), // initializd in main body			
-	Hcomputer(parsedINI),
+	//~ Hcomputer(parsedINI),
 		// HComputer's settings are read from the INI folder [power]
 	gen(), // deafult seed
-	iEvent_plus1(0),
+	iEvent_plus1(0),	
 	//~ lMax(parsedINI.value("power/lMax", 128).toInt()),
-	status(Status::UNINIT)
+	status(Status::UNINIT),
+	trackShape(nullptr), towerShape(nullptr)
 {
 	// We could be using a file on disk which uses the default name.
 	// We will only use all default values when ini_filePath is not on disk.
@@ -114,7 +115,7 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(QSettings const& parsedINI):
 	{
 		trackShape = new h_Gaussian(kdp::ReadAngle<double>(
 			parsedINI.value("smear/tracks", "1 deg").toString().toStdString()));
-		trackShape->OnAxis(1024lu);
+		trackShape->hl_Vec(1024lu);
 		
 		auto towerArea = detector->GetTowerArea();
 		std::vector<double> area2;
@@ -126,7 +127,7 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(QSettings const& parsedINI):
 		
 		towerShape = new h_Cap(std::sqrt(area2[area2.size() / 2]));
 		std::cout << "frac: " << std::sqrt(area2[area2.size() / 2])/(real_t(4)*M_PI) << std::endl;
-		towerShape->OnAxis(1024lu);
+		towerShape->hl_Vec(1024lu);
 	}
 	
 	////////////////////
@@ -160,7 +161,7 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork()
 		detected.insert(detected.end(), 
 			detector->Towers().cbegin(), detector->Towers().cend());
 		
-		real_t totalE = 0.;	
+		real_t totalE = 0.;
 		
 		for(auto const& track : detector->Tracks())
 		{
@@ -179,6 +180,9 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork()
 		
 		for(auto& tower : towers)
 			tower.f /= totalE;
+			
+		tracksTowers = ShapedParticleContainer(tracks, *trackShape);
+		tracksTowers.append(towers, *towerShape);
 			
 		//~ detected_PhatF = PhatF::To_PhatF_Vec(detected);
 		
@@ -362,7 +366,8 @@ std::vector<LHE_Pythia_PowerJets::real_t> const&
 LHE_Pythia_PowerJets::Get_Hl_FinalState(size_t const lMax)
 {
 	if(Hl_FinalState.size() <= lMax)
-		Hl_FinalState = Hcomputer.Hl_Obs(lMax, PhatF::To_PhatF_Vec(detector->FinalState()), *trackShape);
+		Hl_FinalState = PowerSpectrum::Hl_Obs(lMax,
+			ShapedParticleContainer(PhatF::To_PhatF_Vec(detector->FinalState()), *trackShape));
 	return Hl_FinalState;
 }
 
@@ -370,29 +375,43 @@ std::vector<LHE_Pythia_PowerJets::real_t> const&
 LHE_Pythia_PowerJets::Get_Hl_Obs(size_t const lMax)
 {
 	if(Hl_Obs.size() < lMax)
-		Hl_Obs = SpectralPower::Hl_Obs(lMax, tracks, *trackShape, towers, *towerShape);
+		Hl_Obs = PowerSpectrum::Hl_Obs(lMax, tracksTowers);
+		//~ Hl_Obs = Hcomputer.Hl_Obs(lMax, tracks, *trackShape, towers, *towerShape);
 	return Hl_Obs;
 }
 
-std::vector<LHE_Pythia_PowerJets::real_t> const
+std::vector<LHE_Pythia_PowerJets::real_t>
 LHE_Pythia_PowerJets::Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets)
 {
-	return SpectralPower::Hl_Jet(lMax, jets, Get_DetectorFilter(lMax));
+	//~ return SpectralPower::Hl_Jet(lMax, jets, Get_DetectorFilter(lMax));
+	return PowerSpectrum::Hl_Jet(lMax, jets, Get_DetectorFilter(lMax));
 }
 
-std::vector<LHE_Pythia_PowerJets::real_t> const
+std::vector<LHE_Pythia_PowerJets::real_t>
 LHE_Pythia_PowerJets::Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets)
 {
-	return SpectralPower::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax),
-		tracks, *trackShape, towers, *towerShape, Get_Hl_Obs(lMax));
+	//~ return SpectralPower::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax),
+		//~ tracks, *trackShape, towers, *towerShape, Get_Hl_Obs(lMax));
+		
+	return PowerSpectrum::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax), 
+		tracksTowers, Get_Hl_Obs(lMax));
 }
+
+//~ std::vector<LHE_Pythia_PowerJets::real_t>
+//~ LHE_Pythia_PowerJets::Get_Hl_Hybrid_mk2(size_t const lMax, std::vector<ShapedJet> const& jets)
+//~ {
+	//~ SpectralPower::ShapedParticleContainer temp(tracks, *trackShape);
+	//~ temp.append(towers, *towerShape);	
+	
+	//~ return PowerSpectrum::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax), temp);
+//~ }
 
 std::vector<LHE_Pythia_PowerJets::real_t> const& LHE_Pythia_PowerJets::Get_DetectorFilter(size_t const lMax)
 {
 	if(detectorFilter.size() < lMax)
 	{
-		std::vector<real_t> hl_track(trackShape->OnAxis(lMax).begin(), trackShape->OnAxis(lMax).begin() + lMax);
-		std::vector<real_t> hl_tower(towerShape->OnAxis(lMax).begin(), towerShape->OnAxis(lMax).begin() + lMax);
+		std::vector<real_t> hl_track = trackShape->hl_Vec(lMax);
+		std::vector<real_t> hl_tower = towerShape->hl_Vec(lMax);
 		
 		hl_track *= chargeFraction;
 		hl_tower *= real_t(1) - chargeFraction;

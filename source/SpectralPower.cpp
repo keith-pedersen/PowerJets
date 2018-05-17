@@ -9,54 +9,46 @@
 ////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
-//~ std::vector<SpectralPower::PhatF> SpectralPower::PhatF::To_PhatF_Vec
-	//~ (std::vector<Pythia8::Particle> const& original)
-//~ {
-	//~ double totalE = 0.;
-	
-	//~ std::vector<PhatF> newVec;
-	
-	//~ for(Pythia8::Particle const& particle : original)
-	//~ {
-		//~ newVec.emplace_back(particle);
-		//~ totalE += particle.e();
-	//~ }
-		
-	//~ for(auto& pHatF : newVec)
-		//~ pHatF.f /= totalE;
-		
-	//~ return newVec;
-//~ }
+SpectralPower::PhatF::PhatF(vec3_t const& p3):
+	pHat(p3), f(p3.Mag())
+{
+	pHat /= f;
+}
 
 ////////////////////////////////////////////////////////////////////////
 
-std::vector<SpectralPower::PhatF> SpectralPower::PhatF::To_PhatF_Vec
-	(std::vector<vec3_t> const& originalVec)
+SpectralPower::PhatF::PhatF(vec4_t const& p4):
+	pHat(p4.p()), f(p4.x0)
 {
-	std::vector<PhatF> convertedVec;
-	
-	real_t totalE = real_t(0);
-	for(auto const& original : originalVec)
-	{
-		convertedVec.emplace_back(original);
-		totalE += convertedVec.back().f;
-	}
-	
-	for(auto& converted : convertedVec)
-		converted.f /= totalE;
-		
-	return convertedVec;
+	pHat.Normalize();
 }
 
+////////////////////////////////////////////////////////////////////////
+
+SpectralPower::PhatF::PhatF(Jet const& jet):
+	PhatF(jet.p4) {}
+	
+////////////////////////////////////////////////////////////////////////
+
+SpectralPower::PhatF::PhatF(real_t const px, real_t const py, real_t const pz, real_t f_in):
+	pHat(px, py, pz), f(f_in)
+{
+	pHat.Normalize(); // Don't use f to normalize, in case particle has small mass
+}
+
+////////////////////////////////////////////////////////////////////////
+
+SpectralPower::PhatF::PhatF(Pythia8::Particle const& particle):
+	PhatF(particle.px(), particle.py(), particle.pz(), particle.e()) {}			
+
+////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
 SpectralPower::PhatFvec::PhatFvec(std::vector<PhatF> const& orig)
 {
 	reserve(orig.size());
 	for(PhatF const& p : orig)
-	{
 		this->emplace_back(p);
-	}
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -85,7 +77,7 @@ void SpectralPower::PhatFvec::clear()
 
 void SpectralPower::PhatFvec::emplace_back(PhatF const& pHatF)
 {
-	// Not the most efficient way to normalize, but not the killer operation
+	// Assume that pHat is properly normalized
 	x.emplace_back(pHatF.pHat.x1);
 	y.emplace_back(pHatF.pHat.x2);
 	z.emplace_back(pHatF.pHat.x3);
@@ -95,34 +87,24 @@ void SpectralPower::PhatFvec::emplace_back(PhatF const& pHatF)
 
 ////////////////////////////////////////////////////////////////////////
 
-//~ void SpectralPower::PhatFvec::emplace_back
-	//~ (vec3_t const& pHat, real_t const f_in, bool const normalize)
-//~ {
-	//~ // Not the most efficient way to normalize, but not the killer operation
-	//~ real_t const norm = (normalize ? pHat.Mag() : 1.);
-	//~ x.emplace_back(pHat.x1/norm);
-	//~ y.emplace_back(pHat.x2/norm);
-	//~ z.emplace_back(pHat.x3/norm);
+void SpectralPower::PhatFvec::append(PhatFvec const& tail)
+{
+	x.insert(x.end(), tail.x.begin(), tail.x.end());
+	y.insert(y.end(), tail.y.begin(), tail.y.end());
+	z.insert(z.end(), tail.z.begin(), tail.z.end());
 	
-	//~ f.emplace_back(f_in);
-//~ }
+	f.insert(f.end(), tail.f.begin(), tail.f.end());
+}
 
 ////////////////////////////////////////////////////////////////////////
 
 SpectralPower::PhatFvec SpectralPower::PhatFvec::Join
 	(PhatFvec&& first, PhatFvec&& second)
 {
-	// Steal the data in first, using the move ctor
-	//~ PhatFvec joined(std::move(first));
-	
-	// Append second
-	first.x.insert(first.x.end(), second.x.begin(), second.x.end());
-	first.y.insert(first.y.end(), second.y.begin(), second.y.end());
-	first.z.insert(first.z.end(), second.z.begin(), second.z.end());
-	
-	first.f.insert(first.f.end(), second.f.begin(), second.f.end());
-	
-	return first;
+	// Steal the first data, copy in the second (can't steal both)
+	auto retVec = PhatFvec(std::move(first));
+	retVec.append(second);
+	return retVec;
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -144,6 +126,50 @@ SpectralPower::PhatFvec SpectralPower::PhatFvec::Join
 	//~ assert(fProd.size() == pDot.size());
 //~ }
 
+////////////////////////////////////////////////////////////////////////
+
+SpectralPower::ShapedParticleContainer::ShapedParticleContainer(std::vector<ShapedJet> const& jets):
+	PhatFvec(PhatF::To_PhatF_Vec(jets))
+{
+	for(auto const& jet : jets)
+	{
+		shapeStore.push_back(jet.shape.Clone());
+		shapeVec.push_back(shapeStore.back());
+	}
+}
+
+////////////////////////////////////////////////////////////////////////
+
+SpectralPower::ShapedParticleContainer::ShapedParticleContainer
+	(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape):
+	PhatFvec(particles)
+{
+	shapeStore.push_back(theirSharedShape.Clone());
+	while(shapeVec.size() < this->size())
+		shapeVec.push_back(shapeStore.back());
+}
+
+////////////////////////////////////////////////////////////////////////
+
+SpectralPower::ShapedParticleContainer::~ShapedParticleContainer()
+{
+	for(auto const shape : shapeStore)
+		delete shape;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void SpectralPower::ShapedParticleContainer::append
+	(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape)
+{
+	this->PhatFvec::append(PhatFvec(particles));
+	
+	shapeStore.push_back(theirSharedShape.Clone());
+	while(shapeVec.size() < this->size())
+		shapeVec.push_back(shapeStore.back());
+}
+
+////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
 size_t SpectralPower::Outer_Increment::Setup(PhatFvec const& source)
@@ -346,7 +372,7 @@ std::vector<typename SpectralPower::real_t> SpectralPower::H_l_threadedIncrement
 		// The last increment is not full, and is padded with zeroes by outer.Next(), 
 		// which ensures that the last elements of H_l_accumulate are also zero.
 		// Keep going until the lengthSet == 0 (using bool(0) = false, bool(x>0) == true).
-		while(bool(lengthSet = outer.Next(Pl_computer.z, fProd_increment)))
+		while(bool((lengthSet = outer.Next(Pl_computer.z, fProd_increment))))
 		{
 			Pl_computer.Reset(); 
 				
@@ -370,20 +396,20 @@ std::vector<typename SpectralPower::real_t> SpectralPower::H_l_threadedIncrement
 }
 
 std::vector<SpectralPower::real_t> SpectralPower::Hl_Obs(size_t const lMax,
-	std::vector<PhatF> const& particles, ShapeFunction const& particleShape)
+	std::vector<PhatF> const& particles, ShapeFunction& particleShape)
 {
-	return Hl_Extensive_SelfTerm(lMax, particles, particleShape.OnAxis(lMax));
+	return Hl_Extensive_SelfTerm(lMax, particles, particleShape.hl_Vec(lMax));
 }
 
 std::vector<SpectralPower::real_t> SpectralPower::Hl_Obs(size_t const lMax,
-	std::vector<PhatF> const& tracks, ShapeFunction const& trackShape, 
-	std::vector<PhatF> const& towers, ShapeFunction const& towerShape)
+	std::vector<PhatF> const& tracks, ShapeFunction&  trackShape, 
+	std::vector<PhatF> const& towers, ShapeFunction& towerShape)
 {
-	auto Hl_vec = Hl_Extensive_SelfTerm(lMax, tracks, trackShape.OnAxis(lMax));
-	Hl_vec += Hl_Extensive_SelfTerm(lMax, towers, towerShape.OnAxis(lMax));
+	auto Hl_vec = Hl_Extensive_SelfTerm(lMax, tracks, trackShape.hl_Vec(lMax));
+	Hl_vec += Hl_Extensive_SelfTerm(lMax, towers, towerShape.hl_Vec(lMax));
 	Hl_vec += Hl_Extensive_SubTerm(lMax, 
-		tracks, trackShape.OnAxis(lMax), 
-		towers, towerShape.OnAxis(lMax))*real_t(2);
+		tracks, trackShape.hl_Vec(lMax), 
+		towers, towerShape.hl_Vec(lMax))*real_t(2);
 	
 	return Hl_vec;
 }
@@ -491,7 +517,7 @@ std::vector<SpectralPower::real_t> SpectralPower::Hl_Jet(size_t const lMax,
 			pHat.push_back(vec3_t(jets[i].p4.p()).Normalize());
 			
 			// Push back each jet's on-axis coefficients, weighted by the jet's f 
-			auto const& hl_i = jets[i].OnAxis(lMax);
+			auto const& hl_i = jets[i].shape.hl_Vec(lMax);
 			
 			hl_i_onAxis.emplace_back(hl_i.begin(), hl_i.begin() + lMax);
 			hl_i_onAxis.back() *= jets[i].p4.x0;
@@ -542,8 +568,8 @@ std::vector<SpectralPower::real_t> SpectralPower::Hl_Jet(size_t const lMax,
 // WARNING: something broken here
 std::vector<SpectralPower::real_t> SpectralPower::Hl_Hybrid(size_t const lMax,
 	std::vector<ShapedJet> const& jets, std::vector<real_t> const& hl_onAxis_Filter,
-	std::vector<PhatF> const& tracks, ShapeFunction const& trackShape, 
-	std::vector<PhatF> const& towers, ShapeFunction const& towerShape, 
+	std::vector<PhatF> const& tracks, ShapeFunction& trackShape, 
+	std::vector<PhatF> const& towers, ShapeFunction& towerShape, 
 	std::vector<real_t> const& Hl_Obs_in)
 {
 	std::vector<real_t> Hl_vec;
@@ -559,11 +585,11 @@ std::vector<SpectralPower::real_t> SpectralPower::Hl_Hybrid(size_t const lMax,
 	
 	Hl_vec += Hl_Jets_Particles_SubTerm(lMax, 
 		jets, hl_onAxis_Filter, 
-		tracks, trackShape.OnAxis(lMax))*real_t(2);
+		tracks, trackShape.hl_Vec(lMax))*real_t(2);
 		
 	Hl_vec += Hl_Jets_Particles_SubTerm(lMax, 
 		jets, hl_onAxis_Filter, 
-		towers, towerShape.OnAxis(lMax))*real_t(2);
+		towers, towerShape.hl_Vec(lMax))*real_t(2);
 		
 	return Hl_vec * 0.25;
 }
@@ -592,7 +618,7 @@ std::vector<SpectralPower::real_t> SpectralPower::Hl_Jets_Particles_SubTerm(size
 		
 		for(ShapedJet const& jet : jets)
 		{
-			auto const& hl_OnAxis_jet = jet.OnAxis(lMax);
+			auto const& hl_OnAxis_jet = jet.shape.hl_Vec(lMax);
 			vec3_t const jet_pHat = vec3_t(jet.p4.p()).Normalize();
 							
 			size_t k = 0;

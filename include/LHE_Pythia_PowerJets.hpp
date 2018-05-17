@@ -1,3 +1,6 @@
+#ifndef LHE_PYTHIA_POWERJETS
+#define LHE_PYTHIA_POWERJETS
+
 // A program for calculating the smeared spectral power
 // By Keith.David.Pedersen@gmail.com (kpeders1@hawk.iit.edu)
 // Adapted from PYTHIA main11.cc (licenced under the GNU GPL version 2)
@@ -5,7 +8,8 @@
 // TODO: 
 // 1. Make shape functions return l=1--lMax, so there is never any mismatch
 
-#include "SpectralPower.hpp"
+#include "PowerJets.hpp"
+#include "PowerSpectrum.hpp"
 #include "ArrogantDetector.hpp"
 #include "NjetModel.hpp"
 #include "ShapeFunction.hpp"
@@ -20,12 +24,15 @@
 
 #include <QtCore/QSettings> // qt-devel package (CentOS 7), -lQtCore
 
+GCC_IGNORE(-Wpadded)
+
 class LHE_Pythia_PowerJets
 {
 	public:
-		using real_t = SpectralPower::real_t;
-		using PhatF = SpectralPower::PhatF;
-		using PhatFvec = SpectralPower::PhatFvec;
+		using real_t = PowerJets::real_t;
+		using PhatF = PowerSpectrum::PhatF;
+		using PhatFvec = PowerSpectrum::PhatFvec;
+		using ShapedParticleContainer = PowerSpectrum::ShapedParticleContainer;
 
 		using vec3_t = ArrogantDetector::vec3_t;
 		using vec4_t = ArrogantDetector::vec4_t;
@@ -44,7 +51,7 @@ class LHE_Pythia_PowerJets
 			// This is a pointer so we can have either lepton or hadron detector
 			// In the future we can add something like Delphes
 		fastjet::JetDefinition clusterAlg; //! @brief FastJet's clustering algorithm
-		SpectralPower Hcomputer; //! @brief calculates spectral power
+		//~ SpectralPower Hcomputer; //! @brief calculates spectral power
 		pqRand::engine gen; //! A PRNG
 		
 		size_t iEvent_plus1;
@@ -68,6 +75,7 @@ class LHE_Pythia_PowerJets
 		
 		std::vector<PhatF> tracks;
 		std::vector<PhatF> towers;
+		ShapedParticleContainer tracksTowers;
 		
 		enum class PileupBalancingScheme {back2back, shim};
 		real_t pileup_noise2signal;
@@ -121,8 +129,11 @@ class LHE_Pythia_PowerJets
 		
 		std::vector<real_t> const& Get_Hl_FinalState(size_t const lMax);
 		std::vector<real_t> const& Get_Hl_Obs(size_t const lMax);
-		std::vector<real_t> const Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets);
-		std::vector<real_t> const Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets);
+		//~ std::vector<real_t> Get_Hl_Obs_mk2(size_t const lMax);
+		std::vector<real_t> Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets);
+		//~ std::vector<real_t> Get_Hl_Jet_mk2(size_t const lMax, std::vector<ShapedJet> const& jets);
+		std::vector<real_t> Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets);
+		//~ std::vector<real_t> Get_Hl_Hybrid_mk2(size_t const lMax, std::vector<ShapedJet> const& jets);
 				
 		Status Next() {return Next_internal(false);}
 		Status Repeat() {return DoWork();}
@@ -684,3 +695,6 @@ void BinnedSpectralPower::Fill_l1(size_t const edgeFactor)
 	}		
 }
 */
+
+GCC_IGNORE_END
+#endif

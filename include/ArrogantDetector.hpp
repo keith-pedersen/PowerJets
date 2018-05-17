@@ -1,11 +1,14 @@
 #ifndef ARROGANT_DETECTOR
 #define ARROGANT_DETECTOR
 
+#include "PowerJets.hpp"
 #include "kdp/kdpTools.hpp"
-#include "SpectralPower.hpp" // Need to define vector types
+//~ #include "SpectralPower.hpp" // Need to define vector types
 #include "Pythia8/Pythia.h"
 #include "Pythia8/Event.h"
 #include <QtCore/QSettings>
+
+GCC_IGNORE(-Wpadded)
 
 /*! @brief A very basic detector for phenomenological studies
  *  
@@ -362,13 +365,15 @@ class ArrogantDetector_Hadron : public ArrogantDetector
 		//! @brief \f$ \theta = \tanh(\eta) \f$
 		virtual double ToAbsTheta(double const absEta) const;
 		
+		// The next functions disregard their parameters because the answer is always the same
+					
 		//! @brief \a phi bins have constant width \p squareWidth
-		virtual double PhiWidth(towerID_t const thetaIndex) const 
+		virtual double PhiWidth(__attribute__((unused)) towerID_t const thetaIndex) const 
 			{return settings.squareWidth;}
-		
-		virtual towerID_t NumPhiBins(towerID_t const thetaIndex) const 
+					
+		virtual towerID_t NumPhiBins(__attribute__((unused)) towerID_t const thetaIndex) const 
 			{return settings.numPhiBins_centralBand;}
-		
+				
 	public:
 		ArrogantDetector_Hadron(QSettings const& parsedINI, 
 			std::string const& detectorName = "detector"):
@@ -379,5 +384,7 @@ class ArrogantDetector_Hadron : public ArrogantDetector
 		}
 		virtual ~ArrogantDetector_Hadron() {}
 };
+
+GCC_IGNORE_END
 
 #endif

@@ -11,7 +11,7 @@ int main()
 	pqRand::engine gen;
 	
 	LHE_Pythia_PowerJets test;
-	for(size_t i = 0; i < 100; ++i)
+	for(size_t i = 0; i < 3000; ++i)
 	{
 		test.Next();
 		
@@ -26,9 +26,10 @@ int main()
 		for(size_t k = 0; k < nParams; ++k)
 		{
 			if(k == 0)
-				0.3 + 0.7 * params.push_back(gen.U_even());
+				params.push_back(0.3 + 0.7 * gen.U_even());
 			else
 				params.push_back(gen.U_even());
+		}
 					
 		auto jets = ShowerParticle(params, addresses).GetJets();
 		
@@ -44,17 +45,8 @@ int main()
 		double const Hl_Jet_error = std::sqrt(std::accumulate(Hl.begin(), Hl.end(), 0.,
 			[](double const sum, double const val){return sum + kdp::Squared(val);}));
 		
-		
-		//~ if(i == 4)
-		//~ {
-			//~ for(size_t l = 0; l < 10; ++l)
-				//~ printf("%lu   %.3e   %.3e\n", l, Hl[l], Hl_orig[l]);
-			
-			//~ break;
-		//~ }
-		
-		
-		printf("%lu  %.3e  %.3e  %.3e\n", i, Hl_Obs_error, Hl_Hybrid_error, Hl_Jet_error);
+		if((Hl_Obs_error > 1e-8) or (Hl_Hybrid_error > 1e-8) or (Hl_Jet_error > 1e-8))
+			printf("%lu  %.3e  %.3e  %.3e\n", i, Hl_Obs_error, Hl_Hybrid_error, Hl_Jet_error);
 	}	
 		
 	//~ std::vector<double> params = {0.3, 0.8, 0.3, 0.9, 0.9};

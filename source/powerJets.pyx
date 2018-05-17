@@ -116,13 +116,13 @@ cdef extern from "NjetModel.hpp":
 #~ 			const double theta, const double phi, const double omega) except +
 		
 		
-cdef extern from "SpectralPower.hpp":
-	cdef cppclass SpectralPower:
-		@staticmethod
-		vector[double] Power_Jets(const size_t lMax, 
-			const vector[ShapedJet]& jets, const vector[double]& detectorFilter)
+cdef extern from "PowerSpectrum.hpp":
+#~ 	cdef cppclass SpectralPower:
+#~ 		@staticmethod
+#~ 		vector[double] Power_Jets(const size_t lMax, 
+#~ 			const vector[ShapedJet]& jets, const vector[double]& detectorFilter)
 	
-	cdef cppclass PhatF "SpectralPower:PhatF":
+	cdef cppclass PhatF "PowerSpectrum:PhatF":
 		pass	
 		
 cdef extern from "LHE_Pythia_PowerJets.hpp":

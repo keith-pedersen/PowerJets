@@ -82,10 +82,12 @@ void ArrogantDetector::Init_inDerivedCTOR()
 			if(++count > 10) throw std::runtime_error("ArrogantDetector: stuck in loop");
 		}
 	}
-			
+				GCC_IGNORE(-Wfloat-equal)
 	// Account for the same rounding error when the tracker covers the whole detector
 	if(settings.etaMax_track == settings.etaMax_cal)
 		polarMax_track = polarMax_cal;
+				GCC_IGNORE_END
+		
 	assert(GetPolarIndex(std::nextafter(polarMax_track, 0.)) < NumTowerBands());
 		
 	tooBigID = NumTowerBands() * settings.numPhiBins_centralBand;
