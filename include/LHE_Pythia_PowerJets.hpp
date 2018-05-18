@@ -73,6 +73,7 @@ class LHE_Pythia_PowerJets
 		ShapeFunction* trackShape;
 		ShapeFunction* towerShape;
 		
+		PowerSpectrum Hl_computer;
 		std::vector<PhatF> tracks;
 		std::vector<PhatF> towers;
 		ShapedParticleContainer tracksTowers;
@@ -120,8 +121,8 @@ class LHE_Pythia_PowerJets
 		
 		//! @brief (tau * h_l^trk + (1-tau) * h_l^twr)
 		std::vector<real_t> const& Get_DetectorFilter(size_t const lMax);
-				
-		//~ std::vector<PhatF> const& Get_Detected_PhatF() const {return detected_PhatF;}
+		
+			//~ std::vector<PhatF> const& Get_Detected_PhatF() const {return detected_PhatF;}
 		
 		//~ std::vector<real_t> const& Get_H_showered(size_t const lMax);	
 		//~ std::vector<real_t> const& Get_H_det(size_t const lMax);		
@@ -129,11 +130,11 @@ class LHE_Pythia_PowerJets
 		
 		std::vector<real_t> const& Get_Hl_FinalState(size_t const lMax);
 		std::vector<real_t> const& Get_Hl_Obs(size_t const lMax);
-		//~ std::vector<real_t> Get_Hl_Obs_mk2(size_t const lMax);
+		std::vector<real_t> Get_Hl_Obs_slow(size_t const lMax);
 		std::vector<real_t> Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets);
-		//~ std::vector<real_t> Get_Hl_Jet_mk2(size_t const lMax, std::vector<ShapedJet> const& jets);
+		std::vector<real_t> Get_Hl_Jet_slow(size_t const lMax, std::vector<ShapedJet> const& jets);
 		std::vector<real_t> Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets);
-		//~ std::vector<real_t> Get_Hl_Hybrid_mk2(size_t const lMax, std::vector<ShapedJet> const& jets);
+		std::vector<real_t> Get_Hl_Hybrid_slow(size_t const lMax, std::vector<ShapedJet> const& jets);
 				
 		Status Next() {return Next_internal(false);}
 		Status Repeat() {return DoWork();}

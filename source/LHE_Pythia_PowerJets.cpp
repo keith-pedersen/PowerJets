@@ -1,4 +1,5 @@
 #include "LHE_Pythia_PowerJets.hpp"
+#include "SpectralPower.hpp"
 #include "kdp/kdpTools.hpp"
 
 void LHE_Pythia_PowerJets::ClearCache()
@@ -362,11 +363,12 @@ std::vector<Jet> const& LHE_Pythia_PowerJets::Get_FastJets() const
 	return fast_jets;
 }
 
+
 std::vector<LHE_Pythia_PowerJets::real_t> const&
 LHE_Pythia_PowerJets::Get_Hl_FinalState(size_t const lMax)
 {
 	if(Hl_FinalState.size() <= lMax)
-		Hl_FinalState = PowerSpectrum::Hl_Obs(lMax,
+		Hl_FinalState = Hl_computer.Hl_Obs(lMax,
 			ShapedParticleContainer(PhatF::To_PhatF_Vec(detector->FinalState()), *trackShape));
 	return Hl_FinalState;
 }
@@ -375,36 +377,41 @@ std::vector<LHE_Pythia_PowerJets::real_t> const&
 LHE_Pythia_PowerJets::Get_Hl_Obs(size_t const lMax)
 {
 	if(Hl_Obs.size() < lMax)
-		Hl_Obs = PowerSpectrum::Hl_Obs(lMax, tracksTowers);
-		//~ Hl_Obs = Hcomputer.Hl_Obs(lMax, tracks, *trackShape, towers, *towerShape);
+		Hl_Obs = Hl_computer.Hl_Obs(lMax, tracksTowers);
 	return Hl_Obs;
+}
+
+std::vector<LHE_Pythia_PowerJets::real_t>
+LHE_Pythia_PowerJets::Get_Hl_Obs_slow(size_t const lMax)
+{
+	return SpectralPower::Hl_Obs(lMax, tracks, *trackShape, towers, *towerShape);
 }
 
 std::vector<LHE_Pythia_PowerJets::real_t>
 LHE_Pythia_PowerJets::Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets)
 {
-	//~ return SpectralPower::Hl_Jet(lMax, jets, Get_DetectorFilter(lMax));
-	return PowerSpectrum::Hl_Jet(lMax, jets, Get_DetectorFilter(lMax));
+	return Hl_computer.Hl_Jet(lMax, jets, Get_DetectorFilter(lMax));
+}
+
+std::vector<LHE_Pythia_PowerJets::real_t>
+LHE_Pythia_PowerJets::Get_Hl_Jet_slow(size_t const lMax, std::vector<ShapedJet> const& jets)
+{
+	return SpectralPower::Hl_Jet(lMax, jets, Get_DetectorFilter(lMax));
 }
 
 std::vector<LHE_Pythia_PowerJets::real_t>
 LHE_Pythia_PowerJets::Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets)
 {
-	//~ return SpectralPower::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax),
-		//~ tracks, *trackShape, towers, *towerShape, Get_Hl_Obs(lMax));
-		
-	return PowerSpectrum::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax), 
+	return Hl_computer.Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax), 
 		tracksTowers, Get_Hl_Obs(lMax));
 }
 
-//~ std::vector<LHE_Pythia_PowerJets::real_t>
-//~ LHE_Pythia_PowerJets::Get_Hl_Hybrid_mk2(size_t const lMax, std::vector<ShapedJet> const& jets)
-//~ {
-	//~ SpectralPower::ShapedParticleContainer temp(tracks, *trackShape);
-	//~ temp.append(towers, *towerShape);	
-	
-	//~ return PowerSpectrum::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax), temp);
-//~ }
+std::vector<LHE_Pythia_PowerJets::real_t>
+LHE_Pythia_PowerJets::Get_Hl_Hybrid_slow(size_t const lMax, std::vector<ShapedJet> const& jets)
+{
+	return SpectralPower::Hl_Hybrid(lMax, jets, Get_DetectorFilter(lMax),
+		tracks, *trackShape, towers, *towerShape, Get_Hl_Obs(lMax));
+}
 
 std::vector<LHE_Pythia_PowerJets::real_t> const& LHE_Pythia_PowerJets::Get_DetectorFilter(size_t const lMax)
 {

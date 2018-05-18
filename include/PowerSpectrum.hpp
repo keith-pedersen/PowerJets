@@ -2,15 +2,21 @@
 #define POWER_SPECTRUM
 
 #include "PowerJets.hpp"
+#include "kdp/kdpTools.hpp"
 //~ #include "SpectralPower.hpp"
 #include "Pythia8/Event.h"
 #include "NjetModel.hpp"
+#include <memory> // shared_ptr
 #include <atomic>
+#include <condition_variable>
+#include <thread>
 
 /*! @brief A class for parallel, cache-efficient calculation of power spectrum H_l
  * 
- *  Class objects manage threads during parallel execution, 
- *  and are only accessible via the class' static interface.
+ *  This objects manages a pool of threads which are awoken to calculate H_l, 
+ *  then put back to sleep when the calculation is done. 
+ *  This is nearly twice as efficient as the previous iteration, 
+ *  which created and destroyed its threads for each job.
 */
 class PowerSpectrum
 {
@@ -30,7 +36,8 @@ class PowerSpectrum
 		// 16 is two cache lines on my Intel i7. 
 		static constexpr size_t tileWidth = 16;
 		
-		//! @brief A simple struct for storing individual particle information.
+		//! @brief A simple struct for storing particle information
+		//  repeatedly used by the Hl calculation
 		struct PhatF
 		{
 			vec3_t pHat; //!< @brief Unit-direction of travel.
@@ -55,7 +62,7 @@ class PowerSpectrum
 			//! @brief Construct from a Pythia particle (discarding mass, using energy only)
 			PhatF(Pythia8::Particle const& particle);
 			
-			//! @brief Construct a vector of PhatF, normalizing the total f of the collection
+			//! @brief Construct a vector of PhatF, normalizing f for the collection
 			template<class T>
 			static std::vector<PhatF> To_PhatF_Vec(std::vector<T> const& originalVec)
 			{
@@ -85,10 +92,10 @@ class PowerSpectrum
 		*/ 
 		class PhatFvec
 		{
-			// Keep x,y,z,f hidden from everyone but SpectralPower
+			// Keep x,y,z,f hidden from everyone but the 
 			// (and any of its nested classes, which have the same friend rights as SpectralPower).
-			friend class SpectralPower;
 			friend class PowerSpectrum;
+			friend class SpectralPower;			
 			
 			private:
 				std::vector<real_t> x, y, z;
@@ -108,6 +115,9 @@ class PowerSpectrum
 								
 				// We can use implicit copy and move for ctors and assigment, 
 				// because x, y, z, and f all have them defined.
+				// But to get move semantics (instead of copy), we have to ask for them
+				PhatFvec(PhatFvec&&) = default;
+				PhatFvec& operator=(PhatFvec&&) = default;
 				
 				inline size_t size() const {return f.size();}
 				void reserve(size_t const reserveSize);
@@ -122,38 +132,40 @@ class PowerSpectrum
 				static PhatFvec Join(PhatFvec&& first, PhatFvec&& second);
 		};
 		
+		/*! @brief An extension of PhatFvec, but with the addition of particle shape. 
+		 *  This is the most general tool for calculating spectral power
+		 *  (assuming azimuthally symmetric shape functions).
+		 */ 
 		class ShapedParticleContainer : public PhatFvec
 		{
 			friend class PowerSpectrum;
 			
 			private:
 				/* There are three cases for shapes in the container: 
-				 * 1. Every particle has the same shape (i.e. tracks)
-				 * 2. Sets of adjacent particles have the same shape (i.e. towers in a 
+				 * 1. Every particle has the same shape (e.g. tracks)
+				 * 2. Sets of adjacent particles have the same shape (e.g. towers in a 
 				 * calorimeter whose bands do not have identical solid angle, as in a hadronic calorimeter)
-				 * 3. Every particle has unique shape.
+				 * 3. Every particle has unique shape (e.g. jets).
 				 * 
-				 * We now define a system which is efficient for all three.
-				 * 
-				 * We keep all shapes in shape_store, copying any incoming shape.
-				 * + For case 1, we store only one shape in shape_store.
-				 * + For case 2 and 3, we keep a vector of iterators to shapes,
-				 *   one for each particle, which allows multiple particles to
-				 *   point to the same shape. This reduces 
-				 *   redundant calculation of hl during recursion.
-				 * Storing the shapes in shape_store improves cache efficiency, 
-				 * since adjacent particles will have adjacent shapes.
+				 * Because ShapeFunction objects are not thread safe, 
+				 * they will always be cloned before being used in Hl_Thread. 
+				 * Therefore, the easiest way to accommodate all three scenarios
+				 * is simply to store pointers to the supplied ShapeFunctions, 
+				 * one for each particle (repeated shapes having repeated pointers).
+				 * However, this has the nasty side effect that it assumes that 
+				 * the externally supplied ShapeFunction will be kept alive
+				 * and/or not move. A safer bet is to clone all incoming ShapeFunctions.
+				 * To simplify garbage collection (e.g. in case of copy), 
+				 * we use shared_ptr.
 				*/
-				std::vector<ShapeFunction*> shapeStore; // The pointers which need deleting
-				std::vector<ShapeFunction*> shapeVec;
-				//~ std::vector<decltype(shape_store::iterator)> shape;
+				std::vector<std::shared_ptr<ShapeFunction>> shapeVec;
 				
 			public:
 				ShapedParticleContainer() {}
 			
 				ShapedParticleContainer(std::vector<ShapedJet> const& jets);
 				ShapedParticleContainer(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape);
-				~ShapedParticleContainer();
+				//~ ~ShapedParticleContainer();
 				
 				// Warning; to get move semantics for shapeStore, 
 				// we must explicitly invoke move ctor and assignment
@@ -187,6 +199,7 @@ class PowerSpectrum
 		*/ 
 		enum class TileType {DIAGONAL, CENTRAL, BOTTOM, RIGHT, FINAL};
 	
+			GCC_IGNORE(-Wpadded)
 		//! @brief A tile is specified by its boundaries and type
 		struct TileSpecs
 		{
@@ -196,6 +209,7 @@ class PowerSpectrum
 			size_t col_width; //! @brief The number of columns
 			TileType type;
 		};
+			GCC_IGNORE_END
 		
 		// By default, the "left" supplies the rows and the "right" the columns.
 		// However, this is reverse for RIGHT tiles, so that only the FINAL 
@@ -203,51 +217,85 @@ class PowerSpectrum
 		ShapedParticleContainer const* left;
 		ShapedParticleContainer const* right;
 		
+		size_t lMax_internal; //! @brief Calculate H_l form l = 1 -- lMax_internal
+		
 		// A list of tiles which need calculation
 		std::vector<TileSpecs> tileVec;
-		// A thread safe iterator used to assign the next tile to each thread
+		// A thread safe iterator used to assign the next tile to each thread.
+		// Profiling (by others) indicates that std::atomic is at least 
+		// O(10) times faster than using a mutex
 		std::atomic<size_t> nextTile;
 		
 		std::vector<real_t> Hl_total; // The total Hl
-		std::mutex returnLock; // The lock to modify Hl_total		
 		
-		size_t const lMax; //! @brief Calculate H_l form l = 1 -- lMax
+		////////////////////////////////////////////////////////////////
+		// Several variables are necessary for managing the thread pool.
 		
-		//! @brief Keeps grabbing tiles till they're all gone, 
-		// returning the sum of their H_l contributions.
-		std::vector<real_t> Hl_Thread();
+		// The number of idle threads waiting for orders.
+		// This is used to monitor job completion (done when all threads are idle).
+		std::atomic<size_t> idle;
 		
-		//! @brief Call Hl_Thread, then add the result to Hl_total
-		//  (since that thread now has nothing better to do).
-		void DoWork_ThenAddToTotal();		
+		// Two condition variables (wait/notify) are used: 
+		// Threads wait for newJob, which is notified by the manager (this object).
+		// The manager waits for jobDone, and is notified when threads go idle.
+		std::condition_variable newJob, jobDone;
 		
-		//! @brief Given a constructed object, launch the threads and combine their results
-		std::vector<real_t> Launch();
+		// Communication between the threads and the manager is controlled by syncLock
+		std::mutex syncLock; // The "talking stick" of manager-thread communication
 		
-		//! @brief Construct a thread management object that will calculate H_l when launched
-		PowerSpectrum(ShapedParticleContainer const* const left_in, 
-			ShapedParticleContainer const* const right_in, size_t lMax_in);
+		// It is simple to ensure that this object itself is thread-safe; 
+		// this mutex ensures that only one job can be dispatched at a time, 
+		// and that the job must be finished before the next job is dispatched. 
+		std::mutex threadSafe;
+		
+		// The threads are stored in the pool
+		std::vector<std::thread> threadPool;
+		
+		// The thread pool is kept alive by this boolean; the dtor sets it to false
+		bool keepAlive;
+		
+		//! @brief Each thread grabs tiles till they're all gone, then 
+		//  adds the sum of their Hl to Hl_total. Then it does idle until there's a new job.
+		void Hl_Thread();
+		
+		//! @brief Verify a valid wakeup of threads by the managers; 
+		//  either there is new work to do, or it is time to go peacefully into the night.
+		bool ValidWakeup() {return (nextTile < tileVec.size()) or (not keepAlive);}	
+		
+		/*! @brief Construct the list of tiles in the outer product, 
+		 *  launch the threads, collect the result and return, 
+		 *  putting all threads back to sleep.
+		 * 
+		 *  This function is thread-safe; it can only be called by one thread at a time, 
+		 *  which prevents two simultaneous jobs from thrashing each other.
+		 */
+		std::vector<real_t> Hl(ShapedParticleContainer const* const left_in, 
+			ShapedParticleContainer const* const right_in, size_t const lMax);
 	
-	public:		
+	public:
+		//! @brief Construct a thread management object with the given pool size
+		PowerSpectrum(size_t const numThreads = 4);	
+		
+		//! @brief Gracefully disband the thread pool
+		~PowerSpectrum();
+	
 		//! @brief Calculate the power spectrum for a set of particles
-		static std::vector<real_t> Hl_Obs(size_t const lMax, 
+		std::vector<real_t> Hl_Obs(size_t const lMax, 
 			ShapedParticleContainer const& particles);
-			
-		~PowerSpectrum() {}
 		
 		/*! @brief Calculate the power spectrum for a set of jets
 		 * 
 		 *  hl_onAxis_Filter applies the filter of the detector elements.
 		*/ 
-		static std::vector<real_t> Hl_Jet(size_t const lMax, 
+		std::vector<real_t> Hl_Jet(size_t const lMax,
 			ShapedParticleContainer const& jets, std::vector<real_t> const& hl_onAxis_Filter);
 			
 		//! @brief Calculate the power spectrum for a set of jets
-		static std::vector<real_t> Hl_Jet(size_t const lMax, 
+		std::vector<real_t> Hl_Jet(size_t const lMax, 
 			std::vector<ShapedJet> const& jets, std::vector<real_t> const& hl_onAxis_Filter);
 		
 		//! @brief Calculate the hybrid power spectrum for rho = 0.5*(jets + particles)
-		static std::vector<real_t> Hl_Hybrid(size_t const lMax,
+		std::vector<real_t> Hl_Hybrid(size_t const lMax,
 			std::vector<ShapedJet> const& jets_in, std::vector<real_t> const& hl_onAxis_Filter,
 			ShapedParticleContainer const& particles,
 			std::vector<real_t> const& Hl_Obs_in = std::vector<real_t>());

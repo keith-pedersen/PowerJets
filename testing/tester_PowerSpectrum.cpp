@@ -1,4 +1,5 @@
 #include "LHE_Pythia_PowerJets.hpp"
+#include "SpectralPower.hpp"
 #include "pqRand/pqRand.hpp"
 
 int main()
@@ -8,6 +9,8 @@ int main()
 	size_t const nParams = 2 + 3 + 4*nExtraJets;
 	std::vector<std::vector<bool>> addresses = {{true},};
 	
+	SpectralPower Hl_computer();
+	
 	pqRand::engine gen;
 	
 	LHE_Pythia_PowerJets test;
@@ -15,8 +18,8 @@ int main()
 	{
 		test.Next();
 		
-		auto Hl = test.Get_Hl_Obs_mk2(lMax);
-		Hl -= test.Get_Hl_Obs(lMax);
+		auto Hl = test.Get_Hl_Obs(lMax);
+		Hl -= test.Get_Hl_Obs_slow(lMax);
 		
 		double const Hl_Obs_error = std::sqrt(std::accumulate(Hl.begin(), Hl.end(), 0.,
 			[](double const sum, double const val){return sum + kdp::Squared(val);}));
@@ -33,14 +36,14 @@ int main()
 					
 		auto jets = ShowerParticle(params, addresses).GetJets();
 		
-		Hl = test.Get_Hl_Hybrid_mk2(lMax, jets);
-		Hl -= test.Get_Hl_Hybrid(lMax, jets);
+		Hl = test.Get_Hl_Hybrid(lMax, jets);
+		Hl -= test.Get_Hl_Hybrid_slow(lMax, jets);
 		
 		double const Hl_Hybrid_error = std::sqrt(std::accumulate(Hl.begin(), Hl.end(), 0.,
 			[](double const sum, double const val){return sum + kdp::Squared(val);}));
 			
-		Hl = test.Get_Hl_Jet_mk2(lMax, jets);
-		Hl -= test.Get_Hl_Jet(lMax, jets);
+		Hl = test.Get_Hl_Jet(lMax, jets);
+		Hl -= test.Get_Hl_Jet_slow(lMax, jets);
 		
 		double const Hl_Jet_error = std::sqrt(std::accumulate(Hl.begin(), Hl.end(), 0.,
 			[](double const sum, double const val){return sum + kdp::Squared(val);}));
