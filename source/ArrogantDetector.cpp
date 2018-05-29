@@ -346,58 +346,76 @@ void ArrogantDetector::operator()(std::vector<vec4_t> const& neutralVec,
 	{
 		double const energy = itAll->x0;
 		vec3_t const& p3 = itAll->p();
+		double const pMag = p3.Mag();
 		
-		if(itAll < itPileupBegin)
-		{			
-			// Here we make the mistake of assuming that everything is massless, 
-			// so the finalState momentum probably won't balance 100%
-			finalStateE += energy;
-			//~ finalState.emplace_back(p3, energy, true); // true => p3 will be normalized when it is emplaced
-			finalState.push_back(p3);
-		}
-		
-		if(itAll < itChargedBegin) // fundamentally invisible energy
-			invisibleP3 += p3;
-		else // Everything else can potentially be seen in the detector
+		if(energy < 0.)
+			throw std::runtime_error("ArrogantDetector: Negative energy.");
+		if(pMag > energy*(1. + 1e-8)) // Add a little safety buffer for light-like particles
+			throw std::runtime_error("ArrogantDetector: Spacelike-particle: [" + 
+				std::to_string(energy) + ", " + std::to_string(pMag) + "]");
+		if(pMag > 0.) // Only particles that move are detected
 		{
-			double const absPolarAngle = AbsPolarAngle(p3);
-			assert(absPolarAngle >= 0.);
-			
-			if(absPolarAngle < polarMax_cal) // It's within the cal, the detector can see it
-			{
-				// We see a track when ... 
-				if((itAll < itNeutralBegin) // it's charged
-					and (absPolarAngle < polarMax_track) // within the tracker
-					and (p3.T().Mag() > settings.minTrackPT)) // and has enough pT
-				{
-					// The detector will see the momentum of the charged particle and 
-					// assume that it is massless, subtracting only it's momentum from 
-					// the calorimeter cell. So we add the energy excess as a neutral particle.
-					// We don't need to scale p3 in the new neutral because 
-					// p3 is only used to determine direction.
-					double const trackE = p3.Mag();
-					
-					visibleE += trackE;
-					visibleP3 += p3;					
-					
-					// We're about to grow allVec; if it reallocates, all iterators become invalid
-					assert(allVec.size() < allVec.capacity());
-					
-					//~ tracks.emplace_back(finalState.back().pHat, trackE, false); // Reuse pre-normalized vector
-					//~ allVec.emplace_back(energy - trackE, p3, kdp::Vec4from2::Energy);
-					
-					tracks.push_back(p3);
-					allVec.emplace_back(0., p3*(energy/trackE - 1.), kdp::Vec4from2::Mass);
-				}
-				else // we don't see a track, so it's seen by the calorimeter
-				{
-					visibleE += energy;
-					
-					(IsForward(p3) ? foreCal : backCal)
-						[GetTowerID(absPolarAngle, p3.T().Phi())] += energy;
-				}
+			if(itAll < itPileupBegin)
+			{			
+				// Here we make the mistake of assuming that everything is massless, 
+				// so the finalState momentum probably won't balance 100%
+				finalStateE += energy;
+				//~ finalState.emplace_back(p3, energy, true); // true => p3 will be normalized when it is emplaced
+				finalState.push_back(p3);
 			}
-			// else it's not seen
+			
+			if(itAll < itChargedBegin) // fundamentally invisible energy
+				invisibleP3 += p3;
+			else // Everything else can potentially be seen in the detector
+			{
+				double const absPolarAngle = AbsPolarAngle(p3);
+				assert(absPolarAngle >= 0.);
+				
+				if(absPolarAngle < polarMax_cal) // It's within the cal, the detector can see it
+				{
+					// We see a track when ... 
+					if((itAll < itNeutralBegin) // it's charged
+						and (absPolarAngle < polarMax_track) // within the tracker
+						and (p3.T().Mag() > settings.minTrackPT)) // and has enough pT
+					{
+						// The detector will see the momentum of the charged particle and 
+						// assume that it is massless, subtracting only it's momentum from 
+						// the calorimeter cell. So we add the energy excess as a neutral particle.
+						// We don't need to scale p3 in the new neutral because 
+						// p3 is only used to determine direction.
+						double const& trackE = pMag; // trackE part written before pMag; hopefully compiler will ellude
+						
+						visibleE += trackE;
+						visibleP3 += p3;
+						
+						tracks.push_back(p3);
+						
+						// Only bin excess energy when there is some; 
+						// otherwise we create a null 3-vector, which screws up the calorimeter lookup
+						if(trackE < energy)
+						{	
+							// We're about to grow allVec; if it reallocates, all iterators become invalid
+							assert(allVec.size() < allVec.capacity());
+							
+							//~ tracks.emplace_back(finalState.back().pHat, trackE, false); // Reuse pre-normalized vector
+							//~ allVec.emplace_back(energy - trackE, p3, kdp::Vec4from2::Energy);
+							
+							allVec.emplace_back(0., p3*((energy - trackE)/trackE), kdp::Vec4from2::Mass);
+							
+							// THIS IS NOT SAFE; it will round to zero when trackE != energy
+							//~ allVec.emplace_back(0., p3*(energy/trackE - 1.), kdp::Vec4from2::Mass);
+						}
+					}
+					else // we don't see a track, so it's seen by the calorimeter
+					{
+						visibleE += energy;
+						
+						(IsForward(p3) ? foreCal : backCal)
+							[GetTowerID(absPolarAngle, p3.T().Phi())] += energy;
+					}
+				}
+				// else it's not seen
+			}
 		}
 	}
 		

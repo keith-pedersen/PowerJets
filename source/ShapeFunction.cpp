@@ -6,12 +6,29 @@
 
 ////////////////////////////////////////////////////////////////////////
 
-ShapeFunction::ShapeFunction():
+std::vector<ShapeFunction::real_t> ShapeFunction::hl_Vec(size_t const lMax) const
+{
+	// The whole point of this class is that resting and repeating the recursion is
+	// better than trying to cache it, so we will alter the state of this object
+	
+	std::vector<real_t> hl_vec;
+	hl_vec.reserve(lMax);
+	
+	// Use the implicit Reset inside hl
+	for(size_t l = 1; l <= lMax; ++l)
+		hl_vec.push_back(hl(l));
+		
+	return hl_vec;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShapeFunction_Recursive::ShapeFunction_Recursive():
 	l_current(size_t(-1)) {} // Initialize to nonsense value to enforce Reset() call by derived ctor (via assert in hl())
 	
 ////////////////////////////////////////////////////////////////////////
 
-ShapeFunction::real_t ShapeFunction::hl(size_t const l) const
+ShapeFunction_Recursive::real_t ShapeFunction_Recursive::hl(size_t const l) const
 {
 	assert(l_current not_eq size_t(-1));
 	
@@ -47,24 +64,7 @@ ShapeFunction::real_t ShapeFunction::hl(size_t const l) const
 
 ////////////////////////////////////////////////////////////////////////
 
-std::vector<ShapeFunction::real_t> ShapeFunction::hl_Vec(size_t const lMax) const
-{
-	// The whole point of this class is that resting and repeating the recursion is
-	// better than trying to cache it, so we will alter the state of this object
-	
-	std::vector<real_t> hl_vec;
-	hl_vec.reserve(lMax);
-	
-	// Use the implicit Reset inside hl
-	for(size_t l = 1; l <= lMax; ++l)
-		hl_vec.push_back(hl(l));
-		
-	return hl_vec;
-}
-
-////////////////////////////////////////////////////////////////////////
-
-void ShapeFunction::Increment_l() const
+void ShapeFunction_Recursive::Increment_l() const
 {
 	++l_current;
 	twoLplus1 += real_t(2);
@@ -72,7 +72,7 @@ void ShapeFunction::Increment_l() const
 
 ////////////////////////////////////////////////////////////////////////
 
-void ShapeFunction::Set_l(size_t const l) const
+void ShapeFunction_Recursive::Set_l(size_t const l) const
 {
 	l_current = l;
 	twoLplus1 = real_t(2*l_current + 1);

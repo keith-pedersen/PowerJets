@@ -23,6 +23,49 @@ class ShapeFunction
 		using real_t = PowerJets::real_t;
 		using vec3_t = PowerJets::vec3_t;
 		using vec4_t = PowerJets::vec4_t;
+			
+		ShapeFunction() {}
+				
+	public:
+		virtual ~ShapeFunction() {}
+	
+		//! @brief Return h_l for the given l.
+		virtual real_t hl(size_t const l) const = 0;
+	
+		//! @brief Get the vector of on-axis coefficients for l=1 to l=lMax
+		std::vector<real_t> hl_Vec(size_t const lMax) const;
+		
+		virtual ShapeFunction* Clone() const = 0;
+};
+
+class DiracDelta : public ShapeFunction
+{
+	public:
+		DiracDelta() {}
+			
+			GCC_IGNORE(-Wunused)
+		real_t hl(size_t const l) const final {return real_t(1);}
+			GCC_IGNORE_END
+		
+		ShapeFunction* Clone() const {return new DiracDelta();}
+};
+
+/*! @brief Calculate the on-axis coefficient for the particle shape function.
+ * 
+ *  The ShapeFunction_Recursive is a state machine whose state (l) is mutable. 
+ *  This property is useful because, while a user may be able to change the state, 
+ *  they cannot alter the answer they will get. Hence, calling hl(23)
+ *  is equivalent to looking up the value hl_Vec[22], just without 
+ *  explicitly storing the vector.
+ * 
+ *  @warning ShapeFunction is not thread safe
+*/ 
+class ShapeFunction_Recursive : public ShapeFunction
+{
+	public:
+		using real_t = PowerJets::real_t;
+		using vec3_t = PowerJets::vec3_t;
+		using vec4_t = PowerJets::vec4_t;
 		
 	protected:
 		mutable real_t hl_current;
@@ -35,23 +78,20 @@ class ShapeFunction
 		void Increment_l() const;
 		void Set_l(size_t const l) const;
 		
-		ShapeFunction();
+		ShapeFunction_Recursive();
 				
 	public:
-		virtual ~ShapeFunction() {}
+		virtual ~ShapeFunction_Recursive() {}
 	
 		//! @brief Return h_l for the given l. Advance l if necessary
-		real_t hl(size_t const l) const;
+		real_t hl(size_t const l) const final;
 	
-		//! @brief Get the vector of on-axis coefficients for l=1 to l=lMax
-		std::vector<real_t> hl_Vec(size_t const lMax) const;
-		
-		virtual ShapeFunction* Clone() const = 0;
+		//~ virtual ShapeFunction* Clone() const = 0;
 };
 
 //! @brief A particle uniformly distributed across a 
 // circular cap of solid angle Omega = surfaceFraction * 4 Pi
-class h_Cap : public ShapeFunction
+class h_Cap : public ShapeFunction_Recursive
 {
 	protected:
 		mutable RecursiveLegendre<real_t> Pl_computer;
@@ -73,7 +113,7 @@ class h_Cap : public ShapeFunction
  *  corrected by extrapolating its ratio. The extrapolation begins when 
  *  hl drops below the threshold.
 */
-class h_Unstable : public ShapeFunction
+class h_Unstable : public ShapeFunction_Recursive
 {
 	protected:
 		mutable real_t hl_last;

@@ -63,7 +63,7 @@ class RecursiveLegendre_Increment
 				vec = z;
 				assert(vec.size() == z.size());
 			}
-			for(size_t i = 0; i < z.size(); ++i)
+			for(size_t i = 0; i < vec.size(); ++i)
 				vec[i] = val;
 		}
 		
@@ -123,7 +123,7 @@ class RecursiveLegendre_Increment
 			// Of course, this does not protect against nan in the current z.
 			Fill(*Pl_last, real_t(1));
 			// Now that we've added access to P_lm2, fill Pl_next with NAN
-			Fill(*Pl_next, NAN);
+			Fill(*Pl_next, real_t(NAN));
 		}
 		
 		//! @brief Increment \p l and return the \p P_l array.

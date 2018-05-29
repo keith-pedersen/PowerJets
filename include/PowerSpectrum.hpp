@@ -11,7 +11,7 @@
 #include <condition_variable>
 #include <thread>
 
-/*! @brief A class for parallel, cache-efficient calculation of power spectrum H_l
+/*! @brief A class for parallel, vectorized, cache-efficient calculation of power spectrum H_l
  * 
  *  This objects manages a pool of threads which are awoken to calculate H_l, 
  *  then put back to sleep when the calculation is done. 
@@ -164,7 +164,8 @@ class PowerSpectrum
 				ShapedParticleContainer() {}
 			
 				ShapedParticleContainer(std::vector<ShapedJet> const& jets);
-				ShapedParticleContainer(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape);
+				ShapedParticleContainer(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape = DiracDelta());
+				ShapedParticleContainer(std::vector<vec3_t> const& particles, ShapeFunction const& theirSharedShape = DiracDelta());
 				//~ ~ShapedParticleContainer();
 				
 				// Warning; to get move semantics for shapeStore, 
@@ -172,7 +173,7 @@ class PowerSpectrum
 				ShapedParticleContainer(ShapedParticleContainer&&) = default;
 				ShapedParticleContainer& operator=(ShapedParticleContainer&&) = default;
 				
-				void append(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape);
+				void append(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape = DiracDelta());
 		};
 				
 	private:
@@ -231,17 +232,20 @@ class PowerSpectrum
 		////////////////////////////////////////////////////////////////
 		// Several variables are necessary for managing the thread pool.
 		
-		// The number of idle threads waiting for orders.
-		// This is used to monitor job completion (done when all threads are idle).
-		std::atomic<size_t> idle;
+		// active is the number of threads inside the active work loop. 
+		// They will not be forced to sleep by locking the dispatch_lock.
+		size_t awake;
+		
+		// tilesRemaining is the number of tiles which aren't written yet.
+		size_t tilesRemaining;
 		
 		// Two condition variables (wait/notify) are used: 
 		// Threads wait for newJob, which is notified by the manager (this object).
 		// The manager waits for jobDone, and is notified when threads go idle.
-		std::condition_variable newJob, jobDone;
+		std::condition_variable newJob, jobDone, sleeping;
 		
 		// Communication between the threads and the manager is controlled by syncLock
-		std::mutex syncLock; // The "talking stick" of manager-thread communication
+		std::mutex dispatch_lock, write_lock; // The "talking stick" of manager-thread communication
 		
 		// It is simple to ensure that this object itself is thread-safe; 
 		// this mutex ensures that only one job can be dispatched at a time, 
@@ -259,8 +263,8 @@ class PowerSpectrum
 		void Hl_Thread();
 		
 		//! @brief Verify a valid wakeup of threads by the managers; 
-		//  either there is new work to do, or it is time to go peacefully into the night.
-		bool ValidWakeup() {return (nextTile < tileVec.size()) or (not keepAlive);}	
+		// either there is new work to do, or it is time to go peacefully into the night.
+		bool ValidWakeup() {return (nextTile < tileVec.size()) or (not keepAlive);}
 		
 		/*! @brief Construct the list of tiles in the outer product, 
 		 *  launch the threads, collect the result and return, 
@@ -299,6 +303,12 @@ class PowerSpectrum
 			std::vector<ShapedJet> const& jets_in, std::vector<real_t> const& hl_onAxis_Filter,
 			ShapedParticleContainer const& particles,
 			std::vector<real_t> const& Hl_Obs_in = std::vector<real_t>());
+			
+		static void WriteToFile(std::string const& filePath, 
+			std::vector<std::vector<real_t>> const& Hl_set);
+			
+		static void WriteToFile(std::string const& filePath, 
+			std::vector<real_t> const& Hl);
 };
 
 #endif

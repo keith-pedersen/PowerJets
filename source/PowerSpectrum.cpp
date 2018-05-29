@@ -127,6 +127,12 @@ PowerSpectrum::ShapedParticleContainer::ShapedParticleContainer
 
 ////////////////////////////////////////////////////////////////////////
 
+PowerSpectrum::ShapedParticleContainer::ShapedParticleContainer
+	(std::vector<vec3_t> const& particles, ShapeFunction const& theirSharedShape):
+ShapedParticleContainer(PowerSpectrum::PhatF::To_PhatF_Vec(particles), theirSharedShape) {}
+
+////////////////////////////////////////////////////////////////////////
+
 //~ PowerSpectrum::ShapedParticleContainer::~ShapedParticleContainer()
 //~ {
 	//~ for(auto const shape : shapeStore)
@@ -159,355 +165,391 @@ void PowerSpectrum::Hl_Thread()
 	std::array<real_t, tileWidth> colShapeVal;
 	std::vector<real_t> Hl_job;
 	
-	std::unique_lock<std::mutex> lock(syncLock); // Acquire a lock to synchronize communication
-	lock.unlock(); // Immediately unlock, not needed yet
-	
+	// Construct a lock to synchronize communication
+	// Both keepAlive and nextTile/tileVec are used to synchronize, 
+	// so we must be locked when we check them
+	std::unique_lock<std::mutex> dispatch(dispatch_lock);
+	std::unique_lock<std::mutex> write(write_lock, std::defer_lock);
+		
 	while(keepAlive) // Keep this thread alive as long as instructed
 	{
-		// Each tile adds to this, so we must zero-initialize
-		Hl_job.assign(lMax_internal, real_t(0));
-		bool const symmetric = (left == right); // All tiles share same symmetry
-					
-		size_t tileIndex;
-		
-		// Get the index of our next tile
-		while((tileIndex = nextTile++) < tileVec.size())
+		// Verify an active job (in case of spurious wakeup or thread creation)
+		//~ if(nextTile >= tileVec.size())
+			//~ 
+		if(nextTile < tileVec.size())
 		{
-			auto const& tile = tileVec[tileIndex];
+			// Is it possible for a thread to enter here when there is not an active job?
+			// I don't think so;
 			
-			// Development assertions
-			assert(tile.row_width <= tileWidth);
-			assert(tile.col_width <= tileWidth);
-			if(tile.type == TileType::RIGHT) assert(not symmetric);
-			if(tile.col_width < tileWidth) assert(tile.type == TileType::FINAL);
+			// END DISPATCH SYNCHRONIZATION (unlock so other threads can be dispatched)
+			dispatch.unlock();
 			
-			// Unless it's the final tile, the row should always be full of columns.
-			// For the right edge of the asymmetric product, the columns are full but the rows are not.
-			// We can fix this problem by redefining which vector supplies rows and columns.
-			// WARNING: We assume that this move was anticipated by the PowerSpectrum constructor, 
-			// and it already swapped row/col definitions in our TileSpecs		
-			ShapedParticleContainer const* const rows = (tile.type == TileType::RIGHT) ? right : left;
-			ShapedParticleContainer const* const cols = (tile.type == TileType::RIGHT) ? left : right;
-			
-			// ShapeParticleContainer.shapeVec is a vector of pointers to shape functions.
-			// If all the particles use the same shape function, it is the same pointer over and over.
-			// Unfortunately, these shape functions are not thread safe, 
-			// so we must clone any we intend to use. 
-			// We store all clones in clone_store for memory cleanup.
-			// This is faster than shared_ptr, and because we only use the clones locally, 
-			// it is worth the extra effort of managing the memory manually.
-			std::vector<ShapeFunction*> clone_store;
-			
-			// But we also need to replicate left/right->shapeVec with our clones
-			// (i.e. if shapeVec has the same pointer over and over, then row/colShape will as well).
-			// We will do this replication in the next two scopes, 
-			// which also return values that control the logic.
-			std::vector<ShapeFunction*> colShape, rowShape; 
-			
-			// The column shape matters when there is more than one shape function in the columns;
-			// otherwise, we can apply the same shape to everything in the column
-			bool const colShapeMatters = [&]()
-			{
-				// Here we use a lambda expression so that colShapeMatters can be const-initialized
-				
-				// Map the original column shapes to clones
-				std::map<std::shared_ptr<ShapeFunction>, ShapeFunction*> cloneMap;
-				
-				// First collect all unique shapes by using cloneMap as a std::set
-				// (nullptr is a placeholder)
-				for(size_t j = 0; j < tile.col_width; ++j)
-					cloneMap[cols->shapeVec[tile.col_beg + j]] = nullptr;
-				
-				// Now map all unique shapes to clones, and store the clone pointers for cleanup
-				for(auto shape_it = cloneMap.begin(); shape_it not_eq cloneMap.end(); ++shape_it)
-					clone_store.push_back(shape_it->second = shape_it->first->Clone());
-					
-					
-				// If there is more than one mapping in cloneMap,
-				// then colShape has more than one shape, and the column shape matters
-				if(cloneMap.size() > 1)
-				{
-					// We replicate cols->shapeVec with the clones. 
-					// Use at() as sanity check, because it throws an exception if the pointer is not found
-					for(size_t j = 0; j < tile.col_width; ++j) 
-						colShape.push_back(cloneMap.at(cols->shapeVec[tile.col_beg + j]));
+			// Each tile adds to this, so we must zero-initialize
+			Hl_job.assign(lMax_internal, real_t(0));
+			bool const symmetric = (left == right); // All tiles share same symmetry
 						
-					return true;
-				}
-				else
-				{
-					// Otherwise there is only one shape, and it's the only one we need
-					// This relies specifically on the logic inside the l-loop, 
-					// and we can't do the same thing for the rows.
-					colShape.push_back(cloneMap.begin()->second);
-					return false;
-				}
-			}();
+			size_t tileIndex = -1; // The index of next tile to analyze in the loop
+			size_t tileCount = 0; // How many tiles are analyzed inside the loop before it breaks
 			
-			// Shape "DOESN'T matter" when all the rows have the same shape, 
-			// and all the columns have the same shape, so that: 
-			// 	H_l = h_{l,row} * h_{l,col} * <f_row| P_l( |p_row><p_col| ) |f_col>
-			// In this case, we can worry about shape after the l-loop accumulation (less FLOPS),
-			// otherwise,we must address shape before we accumulate.
-			bool const shapeMatters = [&]()
+			// Get the index of our next tile
+			while((tileIndex = nextTile++) < tileVec.size())
 			{
-				// See previous lambda for instructive comments; same thing here
-				std::map<std::shared_ptr<ShapeFunction>, ShapeFunction*> cloneMap;
+				auto const& tile = tileVec[tileIndex];
+				++tileCount;
 				
-				for(size_t i = 0; i < tile.row_width; ++i)
-					cloneMap[rows->shapeVec[tile.row_beg + i]] = nullptr;
+				// Development assertions
+				assert(tile.row_width <= tileWidth);
+				assert(tile.col_width <= tileWidth);
+				if(tile.type == TileType::RIGHT) assert(not symmetric);
+				if(tile.col_width < tileWidth) assert(tile.type == TileType::FINAL);
 				
-				for(auto shape_it = cloneMap.begin(); shape_it not_eq cloneMap.end(); ++shape_it)
-					clone_store.push_back(shape_it->second = shape_it->first->Clone());
+				// Unless it's the final tile, the row should always be full of columns.
+				// For the right edge of the asymmetric product, the columns are full but the rows are not.
+				// We can fix this problem by redefining which vector supplies rows and columns.
+				// WARNING: We assume that this move was anticipated by the PowerSpectrum constructor, 
+				// and it already swapped row/col definitions in our TileSpecs		
+				ShapedParticleContainer const* const rows = (tile.type == TileType::RIGHT) ? right : left;
+				ShapedParticleContainer const* const cols = (tile.type == TileType::RIGHT) ? left : right;
 				
-				// Even if there is only one shape, we replicate the entire rows->shapeVec,
-				// do to the way that we cache the row's h_l inside the l-loop
-				for(size_t i = 0; i < tile.row_width; ++i)
-					rowShape.push_back(cloneMap.at(rows->shapeVec[tile.row_beg + i]));
+				// ShapeParticleContainer.shapeVec is a vector of pointers to shape functions.
+				// If all the particles use the same shape function, it is the same pointer over and over.
+				// Unfortunately, these shape functions are not thread safe, 
+				// so we must clone any we intend to use. 
+				// We store all clones in clone_store for memory cleanup.
+				// This is faster than shared_ptr, and because we only use the clones locally, 
+				// it is worth the extra effort of managing the memory manually.
+				std::vector<ShapeFunction*> clone_store;
 				
-				// If row shape OR column shape matters, then shape matters
-				return ((cloneMap.size() > 1) or colShapeMatters);
-			}();
-			
-			// To efficiently calculating a small, symmetric outer product
-			// (i.e. Hl_Jet for N=3 jets), the last tile of a symmetric outer is "ragged".
-			// This means that we only calculate the lower half and diagonal.
-			// Doing this creates a *small* (2%) speed hit for large outer products, 
-			// but it is definitely worth it (50% faster) for very small outer products.
-			// A N approaches tileWidth, ragged tiles are definitely slower, 
-			// so we only use the ragged tile when less than half the tile is full.
-			bool const ragged = (symmetric and (tile.type == TileType::FINAL))
-				and (tile.row_width < (tileWidth / 2));
-			if(ragged) assert(tile.row_width == tile.col_width); // symmetry sanity check
-			
-			// Edge/Final tiles do not fill the entire increment, 
-			// so we restrict the inner-product inside the l-loop to only cover the filled portion
-			// (with zero-filled alignment buffer).
-			size_t const k_max = tileWidth * (ragged ?
-				kdp::MinPartitions(kdp::GaussSum(tile.row_width), tileWidth): 
-				tile.row_width);
-			
-			// Similarly, we only want to sum up the filled portion of Hl_accumulate.
-			// However, because BinaryAccumulate must start with a power-of-2 size, 
-			// we start with the smallest power-of-2 which covers the filled portion.
-			size_t const sumSize = kdp::IsPowerOfTwo(k_max) ? k_max : 
-				2 * kdp::LargestBit(k_max);
-			assert(sumSize <= incrementSize);
-			
-			// Zero out the working arrays. Only necessary once per tile because 
-			// each tile will fill these arrays the same way at every l in the l-loop,
-			// so any necessary buffer zero will remain a zero.
-			Pl_computer.z.fill(real_t(0));
-			fProd.fill(real_t(0));
-			Hl_accumulate.fill(real_t(0));
-			// colShape is filled inside the l-loop
+				// But we also need to replicate left/right->shapeVec with our clones
+				// (i.e. if shapeVec has the same pointer over and over, then row/colShape will as well).
+				// We will do this replication in the next two scopes, 
+				// which also return values that control the logic.
+				std::vector<ShapeFunction*> colShape, rowShape; 
 				
-			// Fill fProd:
-			// Symmetry factors accounting for un-computed tiles are applied here
-			// (to double the contribution from off-diaonal tiles, simply double their f).
-			// Testing reveals that three versions is actually noticeably faster,
-			// which motivates the less readable code.
-			
-			// Only final tiles have partially full rows, so we can hard-code
-			// tileWidth as the j-loop end-condition for the non-final tiles.
-			if(tile.type == TileType::FINAL)
-			{
-				if(ragged)
+				// The column shape matters when there is more than one shape function in the columns;
+				// otherwise, we can apply the same shape to everything in the column
+				bool const colShapeMatters = [&]()
 				{
-					size_t k = 0;
+					// Here we use a lambda expression so that colShapeMatters can be const-initialized
 					
-					for(size_t i = 0; i < tile.row_width; ++i)
+					// Map the original column shapes to clones
+					std::map<std::shared_ptr<ShapeFunction>, ShapeFunction*> cloneMap;
+					
+					// First collect all unique shapes by using cloneMap as a std::set
+					// (nullptr is a placeholder)
+					for(size_t j = 0; j < tile.col_width; ++j)
+						cloneMap[cols->shapeVec[tile.col_beg + j]] = nullptr;
+					
+					// Now map all unique shapes to clones, and store the clone pointers for cleanup
+					for(auto shape_it = cloneMap.begin(); shape_it not_eq cloneMap.end(); ++shape_it)
+						clone_store.push_back(shape_it->second = shape_it->first->Clone());
+						
+						
+					// If there is more than one mapping in cloneMap,
+					// then colShape has more than one shape, and the column shape matters
+					if(cloneMap.size() > 1)
 					{
-						for(size_t j = 0; j <= i; ++j)
-						{
-							// Off-diagonal elements need doubling
-							real_t const symmetry = (j == i) ? real_t(1) : real_t(2);
+						// We replicate cols->shapeVec with the clones. 
+						// Use at() as sanity check, because it throws an exception if the pointer is not found
+						for(size_t j = 0; j < tile.col_width; ++j) 
+							colShape.push_back(cloneMap.at(cols->shapeVec[tile.col_beg + j]));
 							
-							fProd[k++] = symmetry * 
-								(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
-						}
+						return true;
 					}
-					
-					// Development assertions
-					assert(k == kdp::GaussSum(tile.row_width));
-					assert(k < k_max);
-				}
-				else
+					else
+					{
+						// Otherwise there is only one shape, and it's the only one we need
+						// This relies specifically on the logic inside the l-loop, 
+						// and we can't do the same thing for the rows.
+						colShape.push_back(cloneMap.begin()->second);
+						return false;
+					}
+				}();
+				
+				// Shape "DOESN'T matter" when all the rows have the same shape, 
+				// and all the columns have the same shape, so that: 
+				// 	H_l = h_{l,row} * h_{l,col} * <f_row| P_l( |p_row><p_col| ) |f_col>
+				// In this case, we can worry about shape after the l-loop accumulation (less FLOPS),
+				// otherwise,we must address shape before we accumulate.
+				bool const shapeMatters = [&]()
 				{
+					// See previous lambda for instructive comments; same thing here
+					std::map<std::shared_ptr<ShapeFunction>, ShapeFunction*> cloneMap;
+					
 					for(size_t i = 0; i < tile.row_width; ++i)
-						for(size_t j = 0 ; j < tile.col_width; ++j)
-							fProd[i * tileWidth + j] = 
-								(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
-				}			
-			}
-			else
-			{
-				// For symmetric outer products, it is faster to use 
-				// diagonal tiles which are full, so only they do not need doubling.
-				real_t const symmetry = (symmetric and (tile.type not_eq TileType::DIAGONAL)) ? 
-					real_t(2) : real_t(1);
+						cloneMap[rows->shapeVec[tile.row_beg + i]] = nullptr;
+					
+					for(auto shape_it = cloneMap.begin(); shape_it not_eq cloneMap.end(); ++shape_it)
+						clone_store.push_back(shape_it->second = shape_it->first->Clone());
+					
+					// Even if there is only one shape, we replicate the entire rows->shapeVec,
+					// do to the way that we cache the row's h_l inside the l-loop
+					for(size_t i = 0; i < tile.row_width; ++i)
+						rowShape.push_back(cloneMap.at(rows->shapeVec[tile.row_beg + i]));
+					
+					// If row shape OR column shape matters, then shape matters
+					return ((cloneMap.size() > 1) or colShapeMatters);
+				}();
 				
-				for(size_t i = 0; i < tile.row_width; ++i)
-					for(size_t j = 0 ; j < tileWidth; ++j) // Hard-code tileWidth for speed
-						fProd[i * tileWidth + j] = symmetry * 
-							(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
-			}
-			
-			// Fill pDot with the dot product of the 3-vectors:
-			// Testing reveals that it is faster to do x, y, and z in separate loops
-			// (since this is how vectorization works).
-			// Testing also shows that 3 versions is faster, even though it's a mess.
-			{
-				array_t& pDot = Pl_computer.z;
+				// To efficiently calculating a small, symmetric outer product
+				// (i.e. Hl_Jet for N=3 jets), the last tile of a symmetric outer is "ragged".
+				// This means that we only calculate the lower half and diagonal.
+				// Doing this creates a *small* (2%) speed hit for large outer products, 
+				// but it is definitely worth it (50% faster) for very small outer products.
+				// A N approaches tileWidth, ragged tiles are definitely slower, 
+				// so we only use the ragged tile when less than half the tile is full.
+				bool const ragged = (symmetric and (tile.type == TileType::FINAL))
+					and (tile.row_width < (tileWidth / 2));
+				if(ragged) assert(tile.row_width == tile.col_width); // symmetry sanity check
 				
+				// Edge/Final tiles do not fill the entire increment, 
+				// so we restrict the inner-product inside the l-loop to only cover the filled portion
+				// (with zero-filled alignment buffer).
+				size_t const k_max = tileWidth * (ragged ?
+					kdp::MinPartitions(kdp::GaussSum(tile.row_width), tileWidth): 
+					tile.row_width);
+				
+				// Similarly, we only want to sum up the filled portion of Hl_accumulate.
+				// However, because BinaryAccumulate must start with a power-of-2 size, 
+				// we start with the smallest power-of-2 which covers the filled portion.
+				size_t const sumSize = kdp::IsPowerOfTwo(k_max) ? k_max : 
+					2 * kdp::LargestBit(k_max);
+				assert(sumSize <= incrementSize);
+				
+				// Zero out the working arrays. Only necessary once per tile because 
+				// each tile will fill these arrays the same way at every l in the l-loop,
+				// so any necessary buffer zero will remain a zero.
+				Pl_computer.z.fill(real_t(0));
+				fProd.fill(real_t(0));
+				Hl_accumulate.fill(real_t(0));
+				// colShape is filled inside the l-loop
+					
+				// Fill fProd:
+				// Symmetry factors accounting for un-computed tiles are applied here
+				// (to double the contribution from off-diaonal tiles, simply double their f).
+				// Testing reveals that three versions is actually noticeably faster,
+				// which motivates the less readable code.
+				
+				// Only final tiles have partially full rows, so we can hard-code
+				// tileWidth as the j-loop end-condition for the non-final tiles.
 				if(tile.type == TileType::FINAL)
 				{
 					if(ragged)
 					{
 						size_t k = 0;
-						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0; j <= i; ++j)
-								pDot[k++] = rows->x[tile.row_beg + i] * cols->x[tile.col_beg + j];
-								
-						k = 0;
-						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0; j <= i; ++j)
-								pDot[k++] += rows->y[tile.row_beg + i] * cols->y[tile.col_beg + j];
 						
-						k = 0;
 						for(size_t i = 0; i < tile.row_width; ++i)
+						{
 							for(size_t j = 0; j <= i; ++j)
-								pDot[k++] += rows->z[tile.row_beg + i] * cols->z[tile.col_beg + j];
+							{
+								// Off-diagonal elements need doubling
+								real_t const symmetry = (j == i) ? real_t(1) : real_t(2);
+								
+								fProd[k++] = symmetry * 
+									(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
+							}
+						}
+						
+						// Development assertions
+						assert(k == kdp::GaussSum(tile.row_width));
+						assert(k < k_max);
 					}
 					else
 					{
 						for(size_t i = 0; i < tile.row_width; ++i)
 							for(size_t j = 0 ; j < tile.col_width; ++j)
+								fProd[i * tileWidth + j] = 
+									(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
+					}			
+				}
+				else
+				{
+					// For symmetric outer products, it is faster to use 
+					// diagonal tiles which are full, so only they do not need doubling.
+					real_t const symmetry = (symmetric and (tile.type not_eq TileType::DIAGONAL)) ? 
+						real_t(2) : real_t(1);
+					
+					for(size_t i = 0; i < tile.row_width; ++i)
+						for(size_t j = 0 ; j < tileWidth; ++j) // Hard-code tileWidth for speed
+							fProd[i * tileWidth + j] = symmetry * 
+								(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
+				}
+				
+				// Fill pDot with the dot product of the 3-vectors:
+				// Testing reveals that it is faster to do x, y, and z in separate loops
+				// (since this is how vectorization works).
+				// Testing also shows that 3 versions is faster, even though it's a mess.
+				{
+					array_t& pDot = Pl_computer.z;
+					
+					if(tile.type == TileType::FINAL)
+					{
+						if(ragged)
+						{
+							size_t k = 0;
+							for(size_t i = 0; i < tile.row_width; ++i)
+								for(size_t j = 0; j <= i; ++j)
+									pDot[k++] = rows->x[tile.row_beg + i] * cols->x[tile.col_beg + j];
+									
+							k = 0;
+							for(size_t i = 0; i < tile.row_width; ++i)
+								for(size_t j = 0; j <= i; ++j)
+									pDot[k++] += rows->y[tile.row_beg + i] * cols->y[tile.col_beg + j];
+							
+							k = 0;
+							for(size_t i = 0; i < tile.row_width; ++i)
+								for(size_t j = 0; j <= i; ++j)
+									pDot[k++] += rows->z[tile.row_beg + i] * cols->z[tile.col_beg + j];
+						}
+						else
+						{
+							for(size_t i = 0; i < tile.row_width; ++i)
+								for(size_t j = 0 ; j < tile.col_width; ++j)
+									pDot[i * tileWidth + j] = 
+										rows->x[tile.row_beg + i] * cols->x[tile.col_beg + j];
+										
+							for(size_t i = 0; i < tile.row_width; ++i)
+								for(size_t j = 0 ; j < tile.col_width; ++j)
+									pDot[i * tileWidth + j] += 
+										rows->y[tile.row_beg + i] * cols->y[tile.col_beg + j];
+										
+							for(size_t i = 0; i < tile.row_width; ++i)
+								for(size_t j = 0 ; j < tile.col_width; ++j)
+									pDot[i * tileWidth + j] += 
+										rows->z[tile.row_beg + i] * cols->z[tile.col_beg + j];
+						}
+					}
+					else
+					{
+						for(size_t i = 0; i < tile.row_width; ++i)
+							for(size_t j = 0 ; j < tileWidth; ++j)
 								pDot[i * tileWidth + j] = 
 									rows->x[tile.row_beg + i] * cols->x[tile.col_beg + j];
 									
 						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0 ; j < tile.col_width; ++j)
+							for(size_t j = 0 ; j < tileWidth; ++j)
 								pDot[i * tileWidth + j] += 
 									rows->y[tile.row_beg + i] * cols->y[tile.col_beg + j];
 									
 						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0 ; j < tile.col_width; ++j)
+							for(size_t j = 0 ; j < tileWidth; ++j)
 								pDot[i * tileWidth + j] += 
 									rows->z[tile.row_beg + i] * cols->z[tile.col_beg + j];
 					}
 				}
-				else
+				
+				// Prepare to iterate
+				Pl_computer.Reset();
+				
+				for(size_t l = 1; l <= lMax_internal; ++l)
 				{
-					for(size_t i = 0; i < tile.row_width; ++i)
-						for(size_t j = 0 ; j < tileWidth; ++j)
-							pDot[i * tileWidth + j] = 
-								rows->x[tile.row_beg + i] * cols->x[tile.col_beg + j];
+					// The branch is quite predictable, and saves one unused call to Pl_computer.Next()
+					// The speed advantage is actually quite noticeable. 
+					if(l > 1)
+						Pl_computer.Next();
+					assert(Pl_computer.l() == l);
+					
+					// Do the original calculation for Dirac delta particles
+					for(size_t k = 0; k < k_max; ++k)
+						Hl_accumulate[k] = Pl_computer.P_l()[k] * fProd[k];
+					
+					// Do we need to handle shape inside the l-loop?
+					if(shapeMatters)
+					{
+						// If columns have different shapes, cache the value of each shape function.
+						// Redundant calls to repeated shapes are still somewhat efficient,
+						// as the cached value is returned (instead of recalculating).
+						if(colShapeMatters)
+						{
+							for(size_t j = 0; j < tile.col_width; ++j)
+								colShapeVal[j] = colShape[j]->hl(l);
+						}
+						else
+							colShapeVal.fill(colShape.front()->hl(l));
+						
+						// The row's h_l will be cached one at a time, since rows are the outer loop
+						if(ragged)
+						{
+							size_t k = 0;
+							for(size_t i = 0; i < tile.row_width; ++i)
+							{
+								real_t const rowShapeVal = rowShape[i]->hl(l);
 								
-					for(size_t i = 0; i < tile.row_width; ++i)
-						for(size_t j = 0 ; j < tileWidth; ++j)
-							pDot[i * tileWidth + j] += 
-								rows->y[tile.row_beg + i] * cols->y[tile.col_beg + j];
+								for(size_t j = 0; j <= i; ++j)
+									Hl_accumulate[k++] *= rowShapeVal * colShapeVal[j];
+							}
+						}
+						else
+						{
+							for(size_t i = 0; i < tile.row_width; ++i)
+							{
+								real_t const rowShapeVal = rowShape[i]->hl(l);
 								
-					for(size_t i = 0; i < tile.row_width; ++i)
-						for(size_t j = 0 ; j < tileWidth; ++j)
-							pDot[i * tileWidth + j] += 
-								rows->z[tile.row_beg + i] * cols->z[tile.col_beg + j];
+								// Wait! If this is a final tile, it's row may not be full!
+								// Doesn't matter, we are writing garbage into something we won't sum
+								// (and is probably already zero, so 0 *= shit = 0). 
+								// This is faster because MOST tiles are full,
+								// and this solution creates less branches overall.
+								for(size_t j = 0 ; j < tileWidth; ++j)
+									Hl_accumulate[i * tileWidth + j] *= rowShapeVal * colShapeVal[j];
+							}
+						}
+					}
+					
+					// Now that we've applied shape, we can accumulate all the terms
+					real_t Hl_sum = kdp::BinaryAccumulate_Destructive(Hl_accumulate, sumSize);
+					
+					// If shape doesn't matter, we can handle it after we accumulate (less FLOPS)
+					if(not shapeMatters)
+						Hl_sum *= rowShape.front()->hl(l) * colShape.front()->hl(l);
+					
+					Hl_job[l - 1] += Hl_sum; // l = 0 is not stored
+				}// end l-loop
+				
+				for(auto const clone : clone_store) // Delete all the shape function clones
+					delete clone;
+			}
+			
+			// No more tiles; this thread is done doing major work.
+			// Since it has nothing better to do, use the thread to 
+			// accumulate to Hl_total before returning completely
+			
+			// We may have entered with the anticipation of doing work, 
+			// but by the time we got around to requesting a tile, they were gone.
+			if(tileCount)
+			{
+				write.lock();
+			
+				if(Hl_total.empty())
+					// The first thread to finish simply sets it's data (std::move for quickness)
+					Hl_total = std::move(Hl_job);
+				else
+					Hl_total += Hl_job; // Otherwise we add to the existing
+				
+				tilesRemaining -= tileCount;
+				//~ printf("%lu   %lu\n", tilesRemaining, tileCount);
+				assert(tilesRemaining < tileVec.size());
+				
+				write.unlock();
+				
+				// The last tile notifies the manager (could have a race to notify, but not a problem)
+				if(tilesRemaining == 0)
+				{
+					// It only makes sense for no active threads if the job is completed
+					assert(nextTile >= tileVec.size());
+					
+					// Notify the manger of job completion; it should own the lock till it returns
+					jobDone.notify_one();
 				}
 			}
 			
-			// Prepare to iterate
-			Pl_computer.Reset();
-			
-			for(size_t l = 1; l <= lMax_internal; ++l)
-			{
-				// The branch is quite predictable, and saves one unused call to Pl_computer.Next()
-				// The speed advantage is actually quite noticeable. 
-				if(l > 1)
-					Pl_computer.Next();
-				assert(Pl_computer.l() == l);
-				
-				// Do the original calculation for Dirac delta particles
-				for(size_t k = 0; k < k_max; ++k)
-					Hl_accumulate[k] = Pl_computer.P_l()[k] * fProd[k];
-				
-				// Do we need to handle shape inside the l-loop?
-				if(shapeMatters)
-				{
-					// If columns have different shapes, cache the value of each shape function.
-					// Redundant calls to repeated shapes are still somewhat efficient,
-					// as the cached value is returned (instead of recalculating).
-					if(colShapeMatters)
-					{
-						for(size_t j = 0; j < tile.col_width; ++j)
-							colShapeVal[j] = colShape[j]->hl(l);
-					}
-					else
-						colShapeVal.fill(colShape.front()->hl(l));
-					
-					// The row's h_l will be cached one at a time, since rows are the outer loop
-					if(ragged)
-					{
-						size_t k = 0;
-						for(size_t i = 0; i < tile.row_width; ++i)
-						{
-							real_t const rowShapeVal = rowShape[i]->hl(l);
-							
-							for(size_t j = 0; j <= i; ++j)
-								Hl_accumulate[k++] *= rowShapeVal * colShapeVal[j];
-						}
-					}
-					else
-					{
-						for(size_t i = 0; i < tile.row_width; ++i)
-						{
-							real_t const rowShapeVal = rowShape[i]->hl(l);
-							
-							// Wait! If this is a final tile, it's row may not be full!
-							// Doesn't matter, we are writing garbage into something we won't sum
-							// (and is probably already zero, so 0 *= shit = 0). 
-							// This is faster because MOST tiles are full,
-							// and this solution creates less branches overall.
-							for(size_t j = 0 ; j < tileWidth; ++j)
-								Hl_accumulate[i * tileWidth + j] *= rowShapeVal * colShapeVal[j];
-						}
-					}
-				}
-				
-				// Now that we've applied shape, we can accumulate all the terms
-				real_t Hl_sum = kdp::BinaryAccumulate_Destructive(Hl_accumulate, sumSize);
-				
-				// If shape doesn't matter, we can handle it after we accumulate (less FLOPS)
-				if(not shapeMatters)
-					Hl_sum *= rowShape.front()->hl(l) * colShape.front()->hl(l);
-				
-				Hl_job[l - 1] += Hl_sum; // l = 0 is not stored
-			}// end l-loop
-			
-			for(auto const clone : clone_store) // Delete all the shape function clones
-				delete clone;
+			// BEGIN DISPATCH SYNCHRONIZATION (lock so we can await next dispatch)
+			dispatch.lock();
 		}
-		// No more tiles; this thread is done doing major work.
-		// Since it has nothing better to do, use the thread to 
-      // accumulate to Hl_total before returning completely
-		
-		// BEGIN SYNCHRONIZATION
-	
-		// Lock access to Hl_total. A std::atomic won't work because we
-		// need to check status, then perform a conditional action.
-		lock.lock();
-		
-		if(Hl_total.empty())
-			// The first thread to finish simply sets it's data (std::move for quickness)
-			Hl_total = std::move(Hl_job);
-		else
-			Hl_total += Hl_job; // Otherwise we add to the existing
-		
-		++idle; // All information has been transmitted, this thread is no longer active	
-		
-		// Notify the manger of job completion; but since we own the syncLock, 
-		// the manager can't wake up until this thread begins its wait
-		jobDone.notify_one(); 
+				
+		//~ printf("sleeping\n");
+		--awake;
+		sleeping.notify_all();
 		
 		// We now begin waiting for the next job (releasing syncLock)
 		// The while loop catches spurious wakeups (which are real, and were detected via assertions),
@@ -516,15 +558,15 @@ void PowerSpectrum::Hl_Thread()
 		// because it requires a callable object or function with no arguments, 
 		// whereas we need to access private information.
 		// However, the predicate is functionally equivalent to this loop.
-		do 
-			newJob.wait(lock);
-		while(not ValidWakeup());
+		//~ while(not ValidWakeup())
+		newJob.wait(dispatch);
+		++awake;
 		
-		// Once awoken, this thread is longer idle
-		--idle;
-		
-		// END SYNCHRONIZATION (must unlock to prevent deadlock)
-		lock.unlock();
+		// Once awoken, the thread is considered active
+		//~ ++active;
+		// We will remain locked until we enter the work loop, 
+		// since both keepAlive and tileVec are used for synchronization, 
+		// and not being locked when checking them could create race conditions
 	}
 }
 
@@ -533,33 +575,40 @@ void PowerSpectrum::Hl_Thread()
 PowerSpectrum::PowerSpectrum(size_t const numThreads):
 	left(nullptr), right(nullptr), 
 	lMax_internal(0), nextTile(0), 
-	idle(0), 
+	awake(4), tilesRemaining(0),
 	keepAlive(true)
 {
-	// Lock down the threads 
-	std::unique_lock<std::mutex> lock(syncLock);
 	threadPool.reserve(numThreads);
 	
 	// Populate the thread pool.
 	// They will immediately find no work to do, and will await notification.
 	for(size_t t = 0; t < numThreads; ++t)
 		threadPool.emplace_back(&PowerSpectrum::Hl_Thread, this);
-		
-	// Wait until all threads are idle and ready for work before returning
-	do
-		jobDone.wait(lock);
-	while(idle < threadPool.size());
 }
 
 ////////////////////////////////////////////////////////////////////////'
 
 PowerSpectrum::~PowerSpectrum()
 {
-	std::unique_lock<std::mutex> safety(threadSafe); // Probably unnecessary
-	assert(idle == threadPool.size());
+	// Lock guard on thread safety so that we can't kill while there's an active job
+	std::lock_guard<std::mutex> safety(threadSafe);
 	
-	// Tell the threads it's time to stop
-	keepAlive = false;
+	// Locking dispatch should force all threads into wait
+	std::unique_lock<std::mutex> dispatch(dispatch_lock);
+	
+	while(awake)
+		sleeping.wait(dispatch);
+	
+	//~ assert(left == nullptr);
+	//~ assert(right == nullptr);
+	//~ assert(tileVec.empty());
+	//~ assert(tilesRemaining == 0);
+	//~ assert(nextTile == 0);
+	
+	// synchronize keepAlive with mutex to prevent race
+	keepAlive = false; // Tell the threads it's time to stop
+	dispatch.unlock();
+	
 	newJob.notify_all();
 	
 	// Gracefully decommission the threads
@@ -574,105 +623,143 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl(
 	ShapedParticleContainer const* const right_in, 
 	size_t const lMax)
 {
-	// Prevent other threads from talking to the threads until this thread returns
-	std::unique_lock<std::mutex> safety(threadSafe);
-	
-	// Prepare to synchronize threads
-	std::unique_lock<std::mutex> lock(syncLock);
-	
-	// All threads should be idle because the last job was properly finished. 
-	// This assertion caught spurious wakeups
-	assert(idle == threadPool.size());
-	
-	// Reset the outer product
-	left = left_in;
-	right = right_in;
-	
-	lMax_internal = lMax;
-	
-	// Reset the bookkeeping
-	tileVec.clear();
-	nextTile = 0;
-	Hl_total.clear();
-	
-	// There are two different tiling methods, depending on symmetric or asymmetric outer products.
-	// These can be combined into a single loop to make less code, 
-	// but then the code becomes less readable. No time is spent here, leave it be.
-	if(left == right)
-	{
-		for(size_t i = 0; i < left->size(); i += tileWidth)
-		{
-			// Detect the last row of tiles
-			TileType rowType_base = ((i + tileWidth) >= left->size()) ? 
-				TileType::BOTTOM : TileType::CENTRAL;
-			
-			// Only complete the lower-half of the outer product; doubling the result.
-			for(size_t j = 0; j <= i; j += tileWidth)
-			{
-				size_t const row_width = (rowType_base == TileType::BOTTOM) ? 
-					left->size() - i : tileWidth;
-					
-				TileType type = rowType_base;
-				
-				// Detect a diagonal tile
-				if(i == j)
-				{
-					type = (rowType_base == TileType::BOTTOM) ? 
-						TileType::FINAL : TileType::DIAGONAL;
-				}
-				
-				// A rows are full of columns except the final tile
-				size_t const col_width = (type == TileType::FINAL) ? 
-					right->size() - j : tileWidth;
-					
-				tileVec.push_back(TileSpecs{i, row_width, j, col_width, type});
-			}
-		}
-	}
+	if(lMax == 0)
+		return std::vector<real_t>();
 	else
 	{
-		for(size_t i = 0; i < left->size(); i += tileWidth)
+		//~ printf("job\n");
+		
+		// Prevent other threads from using to the thread pool until this job is done
+		std::lock_guard<std::mutex> oneConcurrentJob(threadSafe);
+		
+		// Prepare to synchronize threads
+		std::unique_lock<std::mutex> dispatch(dispatch_lock);
+		std::unique_lock<std::mutex> write(write_lock);
+				
+		while(awake)
 		{
-			TileType rowType_base = ((i + tileWidth) >= left->size()) ? 
-				TileType::BOTTOM : TileType::CENTRAL;
-			
-			for(size_t j = 0; j < right->size(); j += tileWidth)
+			printf("waiting - pre job\n");
+			sleeping.wait(dispatch);
+		}		
+		
+		// All threads should be idle because the last job was properly finished,
+		// and all thread management variables should be zeroed out.
+		//~ assert(active == 0);	// This assertion caught spurious wakeups in testing
+		//~ assert(left == nullptr);
+		//~ assert(right == nullptr);
+		//~ assert(tileVec.empty());
+		//~ assert(tilesRemaining == 0);
+		//~ assert(nextTile == 0);
+				
+		// Reset the outer product
+		left = left_in;
+		right = right_in;
+		tileVec.clear();
+		
+		lMax_internal = lMax;
+		Hl_total.clear(); // Couldn't reset this before we returned last job
+		nextTile = 0;
+
+		// There are two different tiling methods, depending on symmetric or asymmetric outer products.
+		// These can be combined into a single loop to make less code, 
+		// but then the code becomes less readable. No time is spent here, leave it be.
+		if(left == right)
+		{
+			for(size_t i = 0; i < left->size(); i += tileWidth)
 			{
-				size_t const row_width = (rowType_base == TileType::BOTTOM) ? 
-					(left->size() - i) : tileWidth;
-					
-				TileType type = rowType_base;
+				// Detect the last row of tiles
+				TileType rowType_base = ((i + tileWidth) >= left->size()) ? 
+					TileType::BOTTOM : TileType::CENTRAL;
 				
-				if((j + tileWidth) >= right->size())
+				// Only complete the lower-half of the outer product; doubling the result.
+				for(size_t j = 0; j <= i; j += tileWidth)
 				{
-					type = (rowType_base == TileType::BOTTOM) ? 
-						TileType::FINAL : TileType::RIGHT;
-				}
-				
-				size_t const col_width = (type not_eq rowType_base) ? 
-					(right->size() - j) : tileWidth;
+					size_t const row_width = (rowType_base == TileType::BOTTOM) ? 
+						left->size() - i : tileWidth;
+						
+					TileType type = rowType_base;
 					
-				if(type == TileType::RIGHT)
-					// Swap rows and columns so rows are full
-					tileVec.push_back(TileSpecs{j, col_width, i, row_width, type});
-				else
+					// Detect a diagonal tile
+					if(i == j)
+					{
+						type = (rowType_base == TileType::BOTTOM) ? 
+							TileType::FINAL : TileType::DIAGONAL;
+					}
+					
+					// A rows are full of columns except the final tile
+					size_t const col_width = (type == TileType::FINAL) ? 
+						right->size() - j : tileWidth;
+						
 					tileVec.push_back(TileSpecs{i, row_width, j, col_width, type});
+				}
 			}
 		}
+		else
+		{
+			for(size_t i = 0; i < left->size(); i += tileWidth)
+			{
+				TileType rowType_base = ((i + tileWidth) >= left->size()) ? 
+					TileType::BOTTOM : TileType::CENTRAL;
+				
+				for(size_t j = 0; j < right->size(); j += tileWidth)
+				{
+					size_t const row_width = (rowType_base == TileType::BOTTOM) ? 
+						(left->size() - i) : tileWidth;
+						
+					TileType type = rowType_base;
+					
+					if((j + tileWidth) >= right->size())
+					{
+						type = (rowType_base == TileType::BOTTOM) ? 
+							TileType::FINAL : TileType::RIGHT;
+					}
+					
+					size_t const col_width = (type not_eq rowType_base) ? 
+						(right->size() - j) : tileWidth;
+						
+					if(type == TileType::RIGHT)
+						// Swap rows and columns so rows are full
+						tileVec.push_back(TileSpecs{j, col_width, i, row_width, type});
+					else
+						tileVec.push_back(TileSpecs{i, row_width, j, col_width, type});
+				}
+			}
+		}
+		
+		tilesRemaining = tileVec.size();
+				
+		if(tilesRemaining) // Perhaps left or right was empty; nothing to do
+		{
+			dispatch.unlock(); // All the pieces are in place, all we need to do is notify
+			
+			//~ printf("dispatch\n");
+			// The tiles are specified; Wake up the threads to do their work.
+			if(tilesRemaining <= minTilesPerThread)
+				newJob.notify_one();
+			else
+				newJob.notify_all();
+				
+			// Wait until there are no more active threads
+			// nextTile is not synchronized, but it is only a necessary condition for wakeup.
+			// Once nextTile >= tileVec.size(), we wait till active == 0, 
+			// and active is properly synchronized
+			while(tilesRemaining)
+			{
+				//~ printf("waiting\n");
+				jobDone.wait(write);
+			}
+		}
+		
+		//~ assert(active == 0);
+		//~ printf("done\n");
+		
+		// Reset the bookkeeping for the next run
+		//~ left = right = nullptr;
+		//~ tileVec.clear();
+		//~ nextTile = tilesRemaining = lMax_internal = 0;
+				
+		return Hl_total;
 	}
-	
-	// The tiles are specified; Wake up the threads to do their work.
-	if(tileVec.size() <= minTilesPerThread)
-		newJob.notify_one();
-	else
-		newJob.notify_all();
-	
-	// Wait until there are no more active threads
-	do
-		jobDone.wait(lock);
-	while(idle < threadPool.size());
-	
-	return Hl_total;
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -693,7 +780,7 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Jet(size_t const lMax,
 	
 	auto Hl_vec = Hl(&jets, &jets, lMax);
 	 	
-	for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+	for(size_t lMinus1 = 0; lMinus1 < Hl_vec.size(); ++lMinus1)
 		Hl_vec[lMinus1] *= kdp::Squared(hl_onAxis_Filter[lMinus1]);
 		
 	return Hl_vec;
@@ -748,7 +835,7 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Hybrid(size_t const lMax,
 			auto Hl_jets_particles = Hl(&jets, &particles, lMax);
 		
 			// Add the doubling factor to this filter step
-			for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+			for(size_t lMinus1 = 0; lMinus1 < Hl_jets_particles.size(); ++lMinus1)
 				Hl_jets_particles[lMinus1] *= real_t(2) * hl_onAxis_Filter[lMinus1];
 				
 			Hl_vec += Hl_jets_particles;
@@ -759,6 +846,63 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Hybrid(size_t const lMax,
 		
 	Hl_vec *= real_t(0.25);		
 	return Hl_vec;
+}
+
+void PowerSpectrum::WriteToFile(std::string const& filePath,
+	std::vector<std::vector<real_t>> const& Hl_set)
+{
+	std::ofstream file(filePath, std::ios::trunc);
+	
+	size_t const lMax = [&]()
+	{
+		size_t minSize = -1;
+		
+		for(auto const& Hl : Hl_set)
+			minSize = std::min(minSize, Hl.size());
+			
+		return minSize;
+	}();
+	
+	constexpr char const* l_format = "%4lu ";
+	constexpr char const* Hl_format = "%.8e ";
+	
+	if(not file.is_open())
+		throw std::ios::failure("PowerSpectrum::WriteToFile: File cannot be opened for write: " + filePath);
+	{
+		char buff[1024];
+
+		sprintf(buff, l_format, 0lu);
+		file << buff;		
+		
+		for(size_t k = 0; k < Hl_set.size(); ++k)
+		{
+			sprintf(buff, Hl_format, 1.);
+			file << buff;
+		}
+		
+		file << "\n";
+		
+		for(size_t lMinus1 = 0; lMinus1 < lMax; ++lMinus1)
+		{
+			sprintf(buff, l_format, lMinus1 + 1);
+			file << buff;		
+			
+			for(size_t k = 0; k < Hl_set.size(); ++k)
+			{
+				sprintf(buff, Hl_format, Hl_set[k][lMinus1]);
+				file << buff;
+			}
+			
+			file << "\n";
+		}
+	}
+}
+
+void PowerSpectrum::WriteToFile(std::string const& filePath,
+	std::vector<real_t> const& Hl)
+{
+	std::vector<std::vector<real_t>> const Hl_set = {Hl};
+	PowerSpectrum::WriteToFile(filePath, Hl_set);
 }
 
 /* Previously I used two methods to launch threads in worker functions (not ctor)
