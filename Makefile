@@ -5,7 +5,7 @@ PJ_DIR = ./lib
 LOCAL_DIR = $(HOME)/local
 
 CXX = gcc
-MARCH = native
+MARCH = corei7-avx
 STD = c++11 
 # GCC flags, including many useful warnings
 # (13.05.2018 @ 13:50) Options updated after reviewing the following GCC pages
@@ -19,7 +19,7 @@ STABILITY_WARNINGS = -Wall -Wextra -W -Wconversion -Wshadow -Wpointer-arith -Wca
 PERFORMANCE_FLAGS = -O2 -march=$(MARCH) -msse4 -mavx2 -Winline -Wdisabled-optimization -Wpadded -ftree-vectorize -funsafe-loop-optimizations -Wvector-operation-performance # vectorize is the only thing from O3 that we want
 BUILD_LIB_FLAGS = -fPIC
 # 
-CXXFLAGS = -std=$(STD) $(STABILITY_WARNINGS) $(PERFORMANCE_FLAGS) $(BUILD_LIB_FLAGS) -g # -ftree-vectorizer-verbose=1 # -fopt-info-vec-optimized
+CXXFLAGS = -std=$(STD) $(STABILITY_WARNINGS) $(PERFORMANCE_FLAGS) $(BUILD_LIB_FLAGS) -g #-ftree-vectorizer-verbose=1 # -fopt-info-vec-optimized
 
 # The directory structure of pqRand
 INCLUDE = ./include

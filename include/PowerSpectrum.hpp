@@ -10,13 +10,24 @@
 #include <atomic>
 #include <condition_variable>
 #include <thread>
+#include <memory>
 
-/*! @brief A class for parallel, vectorized, cache-efficient calculation of power spectrum H_l
+/*! @brief A class managing parallel, vectorized, cache-efficient calculation of a power spectrum H_l
  * 
- *  This objects manages a pool of threads which are awoken to calculate H_l, 
- *  then put back to sleep when the calculation is done. 
- *  This is nearly twice as efficient as the previous iteration, 
- *  which created and destroyed its threads for each job.
+ *  This object is thread safe; it can be called my multiple threads at a time.
+ *  Deconstruction will block until all active jobs have finished and returned.
+ * 
+ *  This class is a useful template for the following concepts in 
+ *  high-performance computing:
+ *  - multi-threading (thread safety via mutex).
+ *  - inter-thread communication (wait and notify via condition_variable).
+ *  - a thread pool (at least twice as efficient as creating new threads for every job).
+ *  - tiling (make linear algebra cache-efficient by breaking the job into squares).
+ *  - auto-vectorization (SIMD instructions via specially designed for loops and data structures).
+ *      - e.g. the object-of-vectors paradigm (versus the vector-of-objects).
+ *  - binary accumulation (take CARE of cancellation and rounding error in large sums).
+ *  - hidden implementation (private data structures can change without altering the API).
+ *  - move semantics (request auto-generated move semantics when class members have them).
 */
 class PowerSpectrum
 {
@@ -26,22 +37,26 @@ class PowerSpectrum
 		using vec4_t = PowerJets::vec4_t;
 				
 		// In the future, these can be dynamic quantities, 
-		// but we don't need that now so we'll let it be
+		// but we don't need that now so we'll hard-code it.
 		static constexpr size_t maxThreads = 4;
-		static constexpr size_t minTilesPerThread = 2;
+		static constexpr size_t minTilesPerThread = 1;
 		
-		// This should be hard-coded for compiling
-		// 16 is the optimal number; not too big, not too small.
+		// This should be a power-of-2, and hard-coded for compiler optimization.
+		// 16 is a good number; not too big, not too small.
 		// 8 and 64 are each 40% slower. 
-		// 16 is two cache lines on my Intel i7. 
+		// 16 is two cache lines on my Intel i7, and the optimal power of two.
 		static constexpr size_t tileWidth = 16;
 		
-		//! @brief A simple struct for storing particle information
-		//  repeatedly used by the Hl calculation
+		//////////////////////////////////////////////////////////////////
+		// First we define a few nested classes used for
+		// interfacing with the class methods.
+		
+		//! @brief A simple struct for storing the primary particle information
+		//  used during the Hl calculation
 		struct PhatF
 		{
 			vec3_t pHat; //!< @brief Unit-direction of travel.
-			real_t f; //!< @brief Energy fraction (versus total event energy).
+			real_t f; //!< @brief Energy fraction (relative to total detected energy).
 			
 			//! @brief Construct from p3 (f=|p3>|), normalizing p3 
 			PhatF(vec3_t const& p3);
@@ -82,20 +97,21 @@ class PowerSpectrum
 			}
 		};
 
-		/*! @brief A collection of PhatF (an object of vectors)
+		/*! @brief A collection of PhatF (an object-of-vectors)
 		 * 
 		 *  When we take the outer products \f$ \hat{p}_i \cdot \hat{p}_j \f$
 		 *  and \f$ f_i f_j \f$, the object-of-vectors paradigm is much faster than the 
 		 *  vector-of-objects paradigm (std::vector<PhatF>), because the 
-		 *  object-of-vectors allows SIMD vectorization of the scalar product.
+		 *  object-of-vectors allows SIMD vectorization of the vector dot-product
+		 *  (e.g. loop over i to calculate dot[k] += vec_x[i] * vec_x[j])
 		 *  @note We deliberately emulate many of the functions of std::vector
 		*/ 
 		class PhatFvec
 		{
-			// Keep x,y,z,f hidden from everyone but the 
-			// (and any of its nested classes, which have the same friend rights as SpectralPower).
+			// Keep x,y,z,f hidden from everyone but PowerSpectrum
+			// (and any of its nested classes, which have the same friend rights).
 			friend class PowerSpectrum;
-			friend class SpectralPower;			
+			friend class SpectralPower;
 			
 			private:
 				std::vector<real_t> x, y, z;
@@ -106,7 +122,7 @@ class PowerSpectrum
 				~PhatFvec() {}
 				
 				/*! @brief Convert a std::vector<PhatF> into a PhatVec
-				 *  (vector-of-classes to class-of-vectors).
+				 *  (vector-of-classes to class-of-vectors); a verbatim copy.
 				 * 
 				 *  @param orig 	the std::vector<PhatF>
 				 *  @param normalize the pHat in the vector-of-classes
@@ -115,7 +131,7 @@ class PowerSpectrum
 								
 				// We can use implicit copy and move for ctors and assigment, 
 				// because x, y, z, and f all have them defined.
-				// But to get move semantics (instead of copy), we have to ask for them
+				// To get move semantics (instead of copy), we have to ask for them.
 				PhatFvec(PhatFvec&&) = default;
 				PhatFvec& operator=(PhatFvec&&) = default;
 				
@@ -177,26 +193,55 @@ class PowerSpectrum
 		};
 				
 	private:
+		//////////////////////////////////////////////////////////////////
+		/* TILING: obs will be specified and dispatched via a number of tiles.
+		 * The problem with ...
+		 * 
+		 * for(i = 0; i < size: ++i)
+		 * 	for(j = 0; j < size; ++j)
+		 * 		doMath[i][j]
+		 * 
+		 * is that we iterate over the whole row before moving to the next row. 
+		 * Hence, the inner loop always iterates over every column 
+		 * (a large swath of memory). Tiling splits the matrix into smaller squares
+		 * with an origin (iTile, jTile):
+		 * 
+		 * for(i = 0; i < 16: ++i)
+		 * 	for(j = 0; j < 16; ++j)
+		 * 		doMath[iTile + i][jTile + j]
+		 * 
+		 * This allows the tile to repeatedly access the same 16 rows and columns, 
+		 * which fit into a few lines in the CPU cache. This is very cache efficient, 
+		 * so that the calculation is limited by the FLOPS, not the memory bus.
+		 * Similarly, by choosing a tileWidth = power-of-2, memory will be aligned, 
+		 * and a small tileWidth allows easier vectorization of the inner loop.
+		 */		  
+	
 		/*! @brief The type of tile for tiled computation
 		 * 
 		 *  When we split the outer product into tiles, there are 
 		 *  five different types of tile we can have. 
-		 *  Each will require different treatment. 
+		 *  Each will require different treatment inside Hl_Thread().
 		 * 
-		 *  Note that for symmetric outer products, 
-		 *  we do not need to calculate the redundant upper tiles.
-		 *  For example, the RIGHT are the same as the BOTTOM, 
-		 *  so we can account for them by doubling the BOTTOM contribution.
+		 *  For symmetric outer products, we do not need to calculate 
+		 *  the redundant upper tiles, we can simply double off-diagonal 
+		 *  (i.e. the RIGHT are the same as the BOTTOM, 
+		 *  and the CENTER show up twice, so simply double their contribution)
 		 * 
 		 *   u x u (symmetric)     u x v (asymmetric)
 		 *  +-----+-----+---     +-----------------+---
-		 *  | D D | # # | #      | C C | C C | C C | R
-		 *  | D D | # # | #      | C C | C C | C C | R
+		 *  | D D | * * | *      | C C | C C | C C | R
+		 *  | D D | * * | *      | C C | C C | C C | R
 		 *  +-----+-----+---     +-----+-----+-----+---
-		 *  | C C | D D | #      | B B | B B | B B | F
-		 *  | C C | D D | # 
+		 *  | C C | D D | *      | B B | B B | B B | F
+		 *  | C C | D D | * 
 		 *  +-----+-----+---
 		 *  | B B | B B | F 
+		 * 
+		 *  For symmetric, DIAGONAL tiles are treated differently than CENTER because
+		 *  it is faster to make them full (and thus redundant), 
+		 *  than jagged (and non-redundant). This requires 
+		 *  *not* doubling the DIAGONAL tiles' contribution.
 		*/ 
 		enum class TileType {DIAGONAL, CENTRAL, BOTTOM, RIGHT, FINAL};
 	
@@ -210,77 +255,147 @@ class PowerSpectrum
 			size_t col_width; //! @brief The number of columns
 			TileType type;
 		};
+		
+		/* Threads are given a Job, which specifies the calculation of an H_l. 
+		 * Each Job usually has many tiles, which are stored inside the Job.
+		 * Each Job will be dispatched to multiple threads (as a pointer) 
+		 * until the job is complete. Then, the thread adding the final piece
+		 * will release the hold on the job and notify the sub-manager (the thread launching the job). 
+		 * A possible race condition has the sub-manager noticing the job is done
+		 * before being notified, deleting the job and returning. 
+		 * When the thread tries to notify on the deleted job ... undefined behavior.
+		 * To prevent this, we will create/access Job objects via a shared_ptr.
+		 * 
+		 * Most of the work of Job is handled through public member functions
+		 * which hide the implementation; this protects me from myself, 
+		 * and also speeds up operation because Hl_Thread is not 
+		 * constantly dereferencing the object pointer, then dereferencing its internal elements.
+		*/ 
+		class Job
+		{
+			private: 
+				// A list of tiles which need calculation
+				std::vector<TileSpecs> tileVec;
+				
+				// A thread-safe iterator used to assign the next tile to each thread.
+				// We do not synchronize/wait on the dispatch of tiles, 
+				// only their completion, so a mutex-protected iterator is not necessary.
+				// Profiling (by others) indicates that std::atomic is at least 
+				// 10 times faster than a mutex-protected value.
+				std::atomic<size_t> nextTile;
+				
+				std::condition_variable done; // Notify sub-manager of job completion.
+				std::mutex jobLock; // Synchronize (done) and (remainingTiles).
+				size_t remainingTiles; // How many tiles remain? When 0, job is done; notify.
+				
+				std::vector<real_t> Hl_total; // The total Hl accumulated by threads running the job
+				
+			public:				
+				// By default, the "left" supplies the rows and the "right" the columns.
+				// However, this is reversed for RIGHT tiles, so that only the FINAL 
+				// tiles have half-full rows.
+				ShapedParticleContainer const* left;
+				ShapedParticleContainer const* right;
+				
+				size_t lMax; //! @brief Calculate H_l form l = 1 -- lMax
+				
+				// Construct a job by stealing the vector of tiles (filled for this object)
+				Job(ShapedParticleContainer const* const left_in,
+					ShapedParticleContainer const* const right_in,
+					size_t const lMax_in, 
+					std::vector<TileSpecs>&& tileVec_in);
+			
+				//! @brief If tiles remain, fill the next TileSpecs into the argument.
+				//  Return false when no tiles remain and tile was not altered.
+				bool GetTile(TileSpecs& tile);
+				
+				size_t RemainingTiles() const {return remainingTiles;}
+			
+				// It is only worth dispatching this job if its tiles were not all assigned
+				bool IsFullyAssigned() const {return nextTile >= tileVec.size();}
+				
+				//! @brief Take the Hl calculated for a certain number of tiles and 
+				//  add it to Hl_total, decreasing remainingTiles by numTiles.
+				//  This operation requires thread safety (handled internally)
+				void Add_Hl(std::vector<real_t>& Hl, size_t const numTiles);
+				
+				//! @brief Wait for job completion and return final Hl
+				std::vector<real_t> Get_Hl();
+		};
 			GCC_IGNORE_END
-		
-		// By default, the "left" supplies the rows and the "right" the columns.
-		// However, this is reverse for RIGHT tiles, so that only the FINAL 
-		// tiles have half-full rows.
-		ShapedParticleContainer const* left;
-		ShapedParticleContainer const* right;
-		
-		size_t lMax_internal; //! @brief Calculate H_l form l = 1 -- lMax_internal
-		
-		// A list of tiles which need calculation
-		std::vector<TileSpecs> tileVec;
-		// A thread safe iterator used to assign the next tile to each thread.
-		// Profiling (by others) indicates that std::atomic is at least 
-		// O(10) times faster than using a mutex
-		std::atomic<size_t> nextTile;
-		
-		std::vector<real_t> Hl_total; // The total Hl
 		
 		////////////////////////////////////////////////////////////////
 		// Several variables are necessary for managing the thread pool.
 		
-		// active is the number of threads inside the active work loop. 
-		// They will not be forced to sleep by locking the dispatch_lock.
-		size_t awake;
+		// Threads wait for newJob. Jobs are constructed by Hl_Job(), 
+		// which notifies the threads (newJob) when the job is craeted, 
+		// then notifies the manager (jobDone) when the job is complete.
+		// The dtor will wait till all jobs are done before deleting the objects.
+		std::condition_variable newJob, jobDone;
 		
-		// tilesRemaining is the number of tiles which aren't written yet.
-		size_t tilesRemaining;
+		/* Mutexes, the "talking stick" of thread communication:
+		 * (dispatch_lock) is used to synchronize the dispatching of 
+		 * Jobs to threads; it locks down newJobs and jobQueue.
+		 * (threadSafe_lock) is used to synchronize the creation of new Jobs, 
+		 * and the waiting for jobs to finish in the dtor; it locks down jobDone and activeJobs.
+		 * BOTH mutexes synchronize keepAlive, the flag which keeps threads 
+		 * alive and waiting. Both must be used to synchronize because
+		 * keepAlive controls both new job creation (in Hl_Job()) and 
+		 * dispatching of existing jobs in (Dispatch())
+		*/ 
+		std::mutex dispatch_lock, threadSafe_lock;
 		
-		// Two condition variables (wait/notify) are used: 
-		// Threads wait for newJob, which is notified by the manager (this object).
-		// The manager waits for jobDone, and is notified when threads go idle.
-		std::condition_variable newJob, jobDone, sleeping;
+		// A queue of jobs, used as first-in-first out queue (FIFO); 
+		// the basic FIFO is std::queue, but it lacks some useful functions.
+		std::deque<std::shared_ptr<Job>> jobQueue;
 		
-		// Communication between the threads and the manager is controlled by syncLock
-		std::mutex dispatch_lock, write_lock; // The "talking stick" of manager-thread communication
+		// To ensure that this object is thread-safe, once a job is begun
+		// the object cannot be deconstructed until all active jobs are finished. 
+		size_t activeJobs;
 		
-		// It is simple to ensure that this object itself is thread-safe; 
-		// this mutex ensures that only one job can be dispatched at a time, 
-		// and that the job must be finished before the next job is dispatched. 
-		std::mutex threadSafe;
-		
-		// The threads are stored in the pool
+		// The threads are stored in the pool (a holding pen, only used during ctor and dtor)
 		std::vector<std::thread> threadPool;
 		
-		// The thread pool is kept alive by this boolean; the dtor sets it to false
+		// The thread pool is kept alive by this boolean. 
+		// This is guarded by BOTH threadSafe_lock and dispatch_lock, 
+		// but is only modified in the dtor.
 		bool keepAlive;
 		
-		//! @brief Each thread grabs tiles till they're all gone, then 
-		//  adds the sum of their Hl to Hl_total. Then it does idle until there's a new job.
+		//! @brief Each thread requests jobs. When it has an active job, 
+		// it grabs tiles till they're all gone, then adds the sum of 
+		// the tiles' Hl to the job's Hl. If there are no jobs, it goes idle.
 		void Hl_Thread();
 		
-		//! @brief Verify a valid wakeup of threads by the managers; 
-		// either there is new work to do, or it is time to go peacefully into the night.
-		bool ValidWakeup() {return (nextTile < tileVec.size()) or (not keepAlive);}
-		
-		/*! @brief Construct the list of tiles in the outer product, 
-		 *  launch the threads, collect the result and return, 
-		 *  putting all threads back to sleep.
+		/*! @brief Dispatch directs the thread pool.
 		 * 
-		 *  This function is thread-safe; it can only be called by one thread at a time, 
-		 *  which prevents two simultaneous jobs from thrashing each other.
+		 *  It is extremely useful to encapsulate the following 
+		 *  functionality into a single function: 
+		 *  1. Dispatch jobs to the threads via the return value.
+		 *  2. Internally prune inactive jobs from the jobQueue
+		 *     (so that Hl_Job() does not have to manage this function). 
+		 *  3. Blocks/wait until there are jobs (putting threads to sleep).
+		 *  4. When all jobs are complete and keepAlive = false, it returns
+		 *     nullptr (shared_ptr equivalent), instructing threads to exit Hl_Thread().
+		*/
+		std::shared_ptr<Job> Dispatch();
+		
+		/*! @brief Construct a new Job (e.g. the list of tiles in its tileVec),
+		 *  put the Job in the jobQueue, notify the threads, and return the result.
+		 * 
+		 *  This function is thread-safe; it can be called by multiple threads
+		 *  simultaneously without any side effects or race conditions.
+		 *  All jobs requested before the dtor is called are guaranteed to finish.
+		 * 
+		 *  @throws throws a runtime_error if called after the dtor.
 		 */
-		std::vector<real_t> Hl(ShapedParticleContainer const* const left_in, 
+		std::vector<real_t> Hl_Job(ShapedParticleContainer const* const left_in, 
 			ShapedParticleContainer const* const right_in, size_t const lMax);
 	
 	public:
-		//! @brief Construct a thread management object with the given pool size
-		PowerSpectrum(size_t const numThreads = 4);	
+		//! @brief Construct a thread-management object with the given pool size.
+		PowerSpectrum(size_t const numThreads = maxThreads);	
 		
-		//! @brief Gracefully disband the thread pool
+		//! @brief Wait for all active jobs to finish, then destroy the thread pool.
 		~PowerSpectrum();
 	
 		//! @brief Calculate the power spectrum for a set of particles
@@ -303,10 +418,16 @@ class PowerSpectrum
 			std::vector<ShapedJet> const& jets_in, std::vector<real_t> const& hl_onAxis_Filter,
 			ShapedParticleContainer const& particles,
 			std::vector<real_t> const& Hl_Obs_in = std::vector<real_t>());
-			
+		
+		/*! @brief Write a set of power spectra to file.
+		 * 
+		 *  Any Hl set which is shorter than the longest set 
+		 *  will be padded with -1., a nonsense value.
+		*/ 
 		static void WriteToFile(std::string const& filePath, 
 			std::vector<std::vector<real_t>> const& Hl_set);
-			
+		
+		//! @brief Write a single power spectra to file.
 		static void WriteToFile(std::string const& filePath, 
 			std::vector<real_t> const& Hl);
 };

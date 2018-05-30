@@ -38,7 +38,7 @@ int main()
 		Hl = test.Get_Hl_Hybrid(lMax, jets);
 				
 		Hl_Hybrid_error = std::sqrt(std::accumulate(Hl.begin(), Hl.end(), 0.,
-			[](double const sum, double const val){return sum + kdp::Squared(val);}));
+			[](double const sum, double const val){return sum + kdp::Squared(val);})); 
 			
 		Hl = test.Get_Hl_Jet(lMax, jets);
 				
@@ -46,7 +46,7 @@ int main()
 			[](double const sum, double const val){return sum + kdp::Squared(val);}));
 		
 		//~ if((Hl_Obs_error > 1e-8) or (Hl_Hybrid_error > 1e-8) or (Hl_Jet_error > 1e-8))
-		printf("%lu  %.3e  %.3e  %.3e\n", i, Hl_Obs_error, Hl_Hybrid_error, Hl_Jet_error);
+		printf("%lu  %.3e  %.3e  %.3e  %lu\n", i, Hl_Obs_error, Hl_Hybrid_error, Hl_Jet_error, test.Get_Detected().size());
 	}
 		
 	//~ std::vector<double> params = {0.3, 0.8, 0.3, 0.9, 0.9};
