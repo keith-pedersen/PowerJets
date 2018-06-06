@@ -57,39 +57,37 @@ class ArrogantDetector
 		//~ typedef typename SpectralPower::PhatF PhatF; //!< @brief The struct for pHat and f
 	
 		//! @brief The main ArrogantDetector settings, read from a parsed INI file.
-		struct Settings
+		class Settings
 		{
-			private:
-				static towerID_t Read_numPhiBins_central(QSettings const& parsedINI, 
-					std::string const& detectorName, char const* const defaultValue);
+			friend class ArrogantDetector;
 			
+			private:
 				static double Read_double(QSettings const& parsedINI, 
 					std::string const& detectorName, std::string const& key, 
 					double const defaultVal);
-				
-			public:
-				/*! @brief The number of phi bins in the central bands.
-				 *  
-				 *  Set by the ctor based upon squareWidth.
-				*/  
-				towerID_t const numPhiBins_centralBand; 
-				double const squareWidth; //!< @brief The angular width of calorimeter cells near the central band.
-				double const etaMax_cal; //!< @brief The maximum pseudorapidity of the calorimeter.
-				double const etaMax_track; //!< @brief The maximum pseudorapidity of the tracker.
-				double const minTrackPT; //!< @brief The minimum pT of detectable tracks.
-							
+					
 				// Read in the requested squareWidth, which is the phi width of towers in the central band, 
 				// then round it so that there are an even number of towers in the central band.
 				// Use this integer to define the actual squareWidth
-				Settings(QSettings const& parsedINI, std::string const& detectorName):
-					numPhiBins_centralBand(Read_numPhiBins_central(parsedINI, detectorName, "5 deg")), // 0.087 rad
-					squareWidth((2.*M_PI)/double(numPhiBins_centralBand)),
-					etaMax_cal(Read_double(parsedINI, detectorName, "etaMax_cal", 5.)),
-					etaMax_track(Read_double(parsedINI, detectorName, "etaMax_track", 2.5)),
-					// Loopers are not tracked: pT = 0.3 |q| B R (0.3 GeV per Tesla per elementary charge)
-					// assume B = 2 T and minR = .5 m, so 300 MeV is a good minimum
-					minTrackPT(Read_double(parsedINI, detectorName, "minTrackPT", 0.3))
-				{}
+				Settings(QSettings const& parsedINI, std::string const& detectorName);
+					
+			public:
+				static constexpr auto squareWidth_default = "5 deg";
+				static constexpr auto etaMax_cal_default = 5.;
+				static constexpr auto etaMax_track_default = 2.5;
+				static constexpr auto minTrackPT_default = 0.3; // 300 MeV
+				// Loopers are not tracked: pT = 0.3 |q| B R (0.3 GeV per Tesla per elementary charge)
+				// assume B = 2 T and minR = .5 m, so 300 MeV is a good minimum
+			
+				/*! @brief The number of phi bins in the central bands.
+				 *  
+				 *  Set by the ctor by rounding requested squareWidth to fit the circle.
+				*/  
+				towerID_t numPhiBins_centralBand; 
+				double squareWidth; //!< @brief The angular width of calorimeter cells near the central band
+				double etaMax_cal; //!< @brief The maximum pseudorapidity of the calorimeter.
+				double etaMax_track; //!< @brief The maximum pseudorapidity of the tracker.
+				double minTrackPT; //!< @brief The minimum pT of detectable tracks.
 		};
 			
 	protected:
@@ -179,7 +177,7 @@ class ArrogantDetector
 		virtual void AddMissingE();		
 				
 		// Bouundary values
-		double polarMax; //!< @brief The maximum possible polar angle.
+		double polarMax_geometric; //!< @brief The maximum possible polar angle.
 		double polarMax_cal; //!< @brief The maximum polar angle for calorimeter coverage.
 		double polarMax_track; //!< @brief The maximum polar angle for tracker coverage.
 		towerID_t tooBigID; //!< @brief One past the largest valid \p towerID.
@@ -229,19 +227,16 @@ class ArrogantDetector
 		// we need to distinguish forward and backward particles.
 		static bool IsForward(vec3_t const& p3) {return (p3.x3 >= 0.);}
 		
-		// To translate \p etaMax to polarAngle \a t using only AbsPolarAngle(),
-		// we create a dummy 3-vector. This hack is slow but acceptable since 
-		// it is only used during initialization in Init_inDerivedCTOR().
-		static vec3_t EtaToVec(double const eta);
+		double PolarFromAbsEta(double const absEta) const;
+		
+		double EtaFromAbsPolar(double const absPolar) const;
 				
 		// Fill calorimeter into towers, flipping the sign of p.x3 if backward
 		void WriteCal(cal_t const& cal, bool const backward);
 		
 	public:
 		//! @brief Read the settings from the INI file and set up the detector.
-		ArrogantDetector(QSettings const& parsedINI, 
-			std::string const& detectorName = "detector"):
-		settings(parsedINI, detectorName), clearME(true) {}
+		ArrogantDetector(QSettings const& parsedINI, std::string const& detectorName = "detector");
 		
 		virtual ~ArrogantDetector();
 		
@@ -263,7 +258,7 @@ class ArrogantDetector
 		//  with a length equal to their dimensionless areaa dA = dOmega / (4 pi)
 		std::vector<vec3_t> GetTowerArea() const;
 		
-		inline Settings const& GetSettings() const {return settings;}
+		inline Settings GetSettings() const {return settings;}
 		
 		/*! @brief Fill the detector from the Pythia event.
 		 * 

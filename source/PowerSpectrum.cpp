@@ -915,7 +915,7 @@ void PowerSpectrum::WriteToFile(std::string const& filePath,
 		size_t maxSize = 0;
 		
 		for(auto const& Hl : Hl_set)
-			maxSize = std::min(maxSize, Hl.size());
+			maxSize = std::max(maxSize, Hl.size());
 			
 		return maxSize;
 	}();

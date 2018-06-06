@@ -2,21 +2,25 @@
 #include <stdexcept>
 #include <assert.h>
 
-ArrogantDetector::~ArrogantDetector() {}
-
-ArrogantDetector::towerID_t ArrogantDetector::Settings::Read_numPhiBins_central
-(QSettings const& parsedINI, std::string const& detectorName, char const* const defaultValue)
+ArrogantDetector::Settings::Settings(QSettings const& parsedINI, std::string const& detectorName)
 {
-	//~ return towerID_t(std::round((2.*M_PI)/kdp::ReadAngle<double>(parsedINI.
-		//~ value((detectorName + "/squareWidth").c_str(), defaultValue).
-			//~ toString().toStdString())));
+	// Read in the requested squareWidth, which is the phi width of towers in the central band
+	squareWidth = kdp::ReadAngle<double>(parsedINI.value(
+		(detectorName + "/squareWidth").c_str(), squareWidth_default).toString().toStdString());
+		
+	// Round it so that there are an even number of towers in the central band.
+	numPhiBins_centralBand = 2*towerID_t(std::round(M_PI/squareWidth));
+
+	// Now use this integer to define the actual squareWidth
+	squareWidth = (2.*M_PI)/double(numPhiBins_centralBand);
 	
-	// Force an even number of phi bins
-	return towerID_t(2.*std::round(M_PI/kdp::ReadAngle<double>(parsedINI.
-		value((detectorName + "/squareWidth").c_str(), defaultValue).
-			toString().toStdString())));
+	etaMax_cal = Read_double(parsedINI, detectorName, "etaMax_cal", etaMax_cal_default);
+	etaMax_track = Read_double(parsedINI, detectorName, "etaMax_track", etaMax_track_default);
+	minTrackPT = Read_double(parsedINI, detectorName, "minTrackPT", minTrackPT_default);
 }
-			
+
+////////////////////////////////////////////////////////////////////////
+
 double ArrogantDetector::Settings::Read_double
 (QSettings const& parsedINI, std::string const& detectorName, 
 	std::string const& key, double const defaultVal)
@@ -24,6 +28,17 @@ double ArrogantDetector::Settings::Read_double
 	return parsedINI.value((detectorName + "/" + key).c_str(), defaultVal).toDouble();
 }
 
+////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
+
+ArrogantDetector::ArrogantDetector(QSettings const& parsedINI,
+	std::string const& detectorName):
+settings(parsedINI, detectorName), clearME(true) {}
+		
+////////////////////////////////////////////////////////////////////////
+
+ArrogantDetector::~ArrogantDetector() {}
+			
 ////////////////////////////////////////////////////////////////////////
 
 ArrogantDetector* ArrogantDetector::NewDetector(QSettings const& parsedINI, 
@@ -43,41 +58,65 @@ ArrogantDetector* ArrogantDetector::NewDetector(QSettings const& parsedINI,
 		throw std::runtime_error("ArrogantDetector: only type containing \"lep\" of \"had\" is supported!");
 }
 
-ArrogantDetector::vec3_t ArrogantDetector::EtaToVec(double const eta)
+////////////////////////////////////////////////////////////////////////
+
+double ArrogantDetector::PolarFromAbsEta(double const absEta) const
 {
-	// theta = 2*atan(exp(-eta)) OR
-	// p> = {pT cos(phi), pT sin(phi), pT sinh(eta)} = pT {cos(phi), sin(phi), sinh(eta)}
-	// We can choose any phi, so make it simple ... phi = 0
-	// Similarly, ignore length, so we choose pT = 1
-	return vec3_t(1., 0., std::sinh(eta));
+	// To translate \p absEta to the polar angle \a t using only AbsPolarAngle(),
+	// we create a dummy 3-vector. This hack is slow but acceptable since 
+	// it is only used during initialization in Init_inDerivedCTOR().
+	
+	return AbsPolarAngle(vec3_t(1., std::fabs(absEta), 0., kdp::Vec3from::LengthEtaPhi));
 }
 
-double  ArrogantDetector::EtaMaxToPolarMax(double const etaMax_i) const
+////////////////////////////////////////////////////////////////////////
+
+double ArrogantDetector::EtaFromAbsPolar(double const absPolar) const
 {
-	double polarMax_i = kdp::RoundToNearestPitch(AbsPolarAngle(EtaToVec(etaMax_i)), settings.squareWidth);
-	if(polarMax_i >= polarMax)
-		polarMax_i -= settings.squareWidth; // Make sure there is a beam hole.
-	assert(polarMax_i < polarMax);
-		
-	return polarMax_i;
+	// To translate absPolar to pseudorapidity, we create a dummy 3-vector
+	// This hack is slow but acceptable since it is only used during initialization	
+	double const absTheta = ToAbsTheta(absPolar);
+	
+	return vec3_t(std::cos(absTheta), 0., std::sin(absTheta)).Eta();
 }
+
+////////////////////////////////////////////////////////////////////////
+
+double ArrogantDetector::EtaMaxToPolarMax(double const etaMax) const
+{
+	// Convert eta to polar angle
+	double polarMax = kdp::RoundToNearestPitch(PolarFromAbsEta(etaMax), settings.squareWidth);
+	
+	// Make sure there is a beam hole.
+	if(polarMax >= polarMax_geometric)
+		polarMax -= settings.squareWidth;
+	assert(polarMax < polarMax_geometric);
+		
+	return polarMax;
+}
+
+////////////////////////////////////////////////////////////////////////
 
 void ArrogantDetector::Init_inDerivedCTOR()
 {
-	polarMax = AbsPolarAngle(vec3_t(0., 0., 1.));
+	// Initialize ID
+	tooBigID = NumTowerBands() * settings.numPhiBins_centralBand;
+	
+	// Initialize polarMax
+	polarMax_geometric = AbsPolarAngle(vec3_t(0., 0., 1.));
 		
 	polarMax_cal = EtaMaxToPolarMax(settings.etaMax_cal);
 	polarMax_track = EtaMaxToPolarMax(settings.etaMax_track);
 	
 	// Account for tiny little rounding errors near the edge of the detector.
-	// These can cause (absPolarAngle < polarMax_cal) to return an invalid polarIndex
+	// These can cause (absPolarAngle < polarMax_cal) to return a polarIndex one-too-large
 	{
-		size_t count = 0;
+		size_t count = 0; // More readable than a for loop
 
-		// Usually, one iteration through the loop is enough 
+		// Usually, one pass through the loop is enough 
 		while(GetPolarIndex(std::nextafter(polarMax_cal, 0.)) == NumTowerBands())
 		{
-			polarMax_cal = std::nextafter(polarMax_cal, 0.);
+			polarMax_cal = std::nextafter(polarMax_cal, 0.); // Move one float closer to zero
 			
 			if(++count > 10) throw std::runtime_error("ArrogantDetector: stuck in loop");
 		}
@@ -89,9 +128,12 @@ void ArrogantDetector::Init_inDerivedCTOR()
 				GCC_IGNORE_END
 		
 	assert(GetPolarIndex(std::nextafter(polarMax_track, 0.)) < NumTowerBands());
-		
-	tooBigID = NumTowerBands() * settings.numPhiBins_centralBand;
+	
+	settings.etaMax_cal = EtaFromAbsPolar(polarMax_cal);
+	settings.etaMax_track = EtaFromAbsPolar(polarMax_track);
 }
+
+////////////////////////////////////////////////////////////////////////
 
 void ArrogantDetector::SanityCheck_inDerivedCTOR()
 {
@@ -112,20 +154,26 @@ void ArrogantDetector::SanityCheck_inDerivedCTOR()
 	}
 }
 
+////////////////////////////////////////////////////////////////////////
+
 ArrogantDetector::towerID_t ArrogantDetector::NumTowerBands() const
 {
 	return towerID_t(std::round(polarMax_cal / settings.squareWidth));
 }
 
+////////////////////////////////////////////////////////////////////////
+
 ArrogantDetector::towerID_t ArrogantDetector::GetPolarIndex(double const absPolarAngle) const
 {
 	// These are asserts because these angles are determined by ArrogantDetector (and derived classes)
 	// If they are wonky, we need to rewrite the detector code
-	assert(absPolarAngle <= polarMax);
+	assert(absPolarAngle <= polarMax_geometric);
 	assert(absPolarAngle >= 0.);
 	
 	return towerID_t(std::floor(absPolarAngle/settings.squareWidth));
 }
+
+////////////////////////////////////////////////////////////////////////
 
 ArrogantDetector::towerID_t ArrogantDetector::GetPhiIndex(double phi,
 	towerID_t const polarIndex) const
@@ -155,6 +203,8 @@ ArrogantDetector::towerID_t ArrogantDetector::GetPhiIndex(double phi,
 	return phiIndex;
 }
 
+////////////////////////////////////////////////////////////////////////
+
 std::pair<ArrogantDetector::towerID_t, ArrogantDetector::towerID_t>
 ArrogantDetector::GetIndices_PolarPhi(double const absPolarAngle, double const phi) const
 {
@@ -163,6 +213,8 @@ ArrogantDetector::GetIndices_PolarPhi(double const absPolarAngle, double const p
 	
 	return std::pair<towerID_t, towerID_t>(polarIndex, phiIndex);
 }
+
+////////////////////////////////////////////////////////////////////////
 
 std::pair<ArrogantDetector::towerID_t, ArrogantDetector::towerID_t>
 ArrogantDetector::GetIndices_PolarPhi(towerID_t const towerID) const
@@ -176,11 +228,15 @@ ArrogantDetector::GetIndices_PolarPhi(towerID_t const towerID) const
 	return std::pair<towerID_t, towerID_t>(polarIndex, phiIndex);
 }
 
+////////////////////////////////////////////////////////////////////////
+
 ArrogantDetector::towerID_t ArrogantDetector::GetTowerID(double const absPolarAngle, double const phi) const
 {
 	auto const indices = GetIndices_PolarPhi(absPolarAngle, phi);
 	return (indices.first * settings.numPhiBins_centralBand) + indices.second;
 }
+
+////////////////////////////////////////////////////////////////////////
 
 std::array<double, 4> ArrogantDetector::GetTowerEdges(towerID_t const towerID) const
 {
@@ -200,6 +256,8 @@ std::array<double, 4> ArrogantDetector::GetTowerEdges(towerID_t const towerID) c
 	return {absTheta_left, absTheta_right, phi_left, phi_left + deltaPhi};
 }
 
+////////////////////////////////////////////////////////////////////////
+
 ArrogantDetector::vec3_t ArrogantDetector::GetTowerCenter(towerID_t const towerID) const
 {
 	auto const edges = GetTowerEdges(towerID);
@@ -210,6 +268,8 @@ ArrogantDetector::vec3_t ArrogantDetector::GetTowerCenter(towerID_t const towerI
 	double const cosTheta = std::cos(absTheta);
 	return vec3_t(std::cos(phi) * cosTheta, std::sin(phi) * cosTheta, std::sin(absTheta));
 }
+
+////////////////////////////////////////////////////////////////////////
 
 std::vector<ArrogantDetector::vec3_t> ArrogantDetector::GetTowerArea() const
 {
@@ -249,6 +309,8 @@ std::vector<ArrogantDetector::vec3_t> ArrogantDetector::GetTowerArea() const
 	return towerVec;
 }
 
+////////////////////////////////////////////////////////////////////////
+
 // Fill the detector from the Pythia event
 void ArrogantDetector::operator()(Pythia8::Pythia& theEvent, 
 	std::vector<vec4_t> const& pileupVec)
@@ -283,6 +345,8 @@ void ArrogantDetector::operator()(Pythia8::Pythia& theEvent,
 	(*this)(neutralVec, chargedVec, invisibleVec, pileupVec); // Do the actual detection
 }
 
+////////////////////////////////////////////////////////////////////////
+
 void ArrogantDetector::Clear()
 {
 	finalState.clear(); 
@@ -293,6 +357,8 @@ void ArrogantDetector::Clear()
 		me.clear(); // Clear the matrix element, if requested
 	clearME = true; // Clear next time. Only don't clear when called by operator(Pythia, ...)
 }
+
+////////////////////////////////////////////////////////////////////////
 
 void ArrogantDetector::operator()(std::vector<vec4_t> const& neutralVec,
 	std::vector<vec4_t> const& chargedVec, std::vector<vec4_t> const& invisibleVec,
@@ -435,6 +501,8 @@ void ArrogantDetector::operator()(std::vector<vec4_t> const& neutralVec,
 		//~ tower.f /= visibleE;
 }
 
+////////////////////////////////////////////////////////////////////////
+
 void ArrogantDetector::WriteCal(cal_t const& cal, bool const backward)
 {
 	// Convert all towers to massless 3-vectors
@@ -455,6 +523,8 @@ void ArrogantDetector::WriteCal(cal_t const& cal, bool const backward)
 	}
 }
 
+////////////////////////////////////////////////////////////////////////
+
 void ArrogantDetector::AddMissingE()
 {
 	double const missingE = visibleP3.Mag();
@@ -464,6 +534,8 @@ void ArrogantDetector::AddMissingE()
 	//~ towers.emplace_back(-visibleP3, missingE);
 	towers.push_back(-visibleP3);
 }
+
+////////////////////////////////////////////////////////////////////////
 
 //! @brief Return all visible energy in calorimeter towers, 
 //  defined by the tower's edges <(theta_L, theta_R, phi_L, phi_R), energy>
@@ -515,6 +587,7 @@ std::vector<std::pair<std::array<double, 4>, double>> ArrogantDetector::AllVisib
 }
 
 ////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
 
 ArrogantDetector_Lepton::~ArrogantDetector_Lepton() {}
 
@@ -523,17 +596,23 @@ double ArrogantDetector_Lepton::AbsPolarAngle(vec3_t const& particle) const
 	return std::atan2(std::fabs(particle.x3), particle.T().Mag());
 }
 
+////////////////////////////////////////////////////////////////////////
+
 double ArrogantDetector_Lepton::PhiWidth
 (towerID_t const thetaIndex) const
 {
 	return phiWidth[thetaIndex];
 }
 
+////////////////////////////////////////////////////////////////////////
+
 ArrogantDetector_Lepton::towerID_t ArrogantDetector_Lepton::NumPhiBins
 (towerID_t const thetaIndex) const
 {
 	return numPhiBins[thetaIndex];
 }
+
+////////////////////////////////////////////////////////////////////////
 
 void ArrogantDetector_Lepton::Init_phiWidth()
 {
@@ -572,18 +651,23 @@ void ArrogantDetector_Lepton::Init_phiWidth()
 }
 
 ////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
 
 double ArrogantDetector_Hadron::AbsPolarAngle(vec3_t const& particle) const
 {
 	return std::fabs(particle.Eta());
 }
 
-// We have p> = {pT cos(phi), pT sin(phi), pT sinh(eta)}
+////////////////////////////////////////////////////////////////////////
+
+// We have p> = {pT cos(phi), pT sin(phi), pT sinh(eta)} = pT {cos(theta), sin(theta)}
 // So theta = atan(sinh(eta)) (also known as the Gudermannian)
 double ArrogantDetector_Hadron::ToAbsTheta(double const absEta) const
 {
 	return std::atan(std::sinh(absEta));
 }
+
+////////////////////////////////////////////////////////////////////////
 
 /*
 ArrogantDetector_Lepton::towerID_t ArrogantDetector_Lepton::GetTowerID
