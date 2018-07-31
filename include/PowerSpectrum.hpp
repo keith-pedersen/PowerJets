@@ -3,7 +3,6 @@
 
 #include "PowerJets.hpp"
 #include "kdp/kdpTools.hpp"
-//~ #include "SpectralPower.hpp"
 #include "Pythia8/Event.h"
 #include "NjetModel.hpp"
 #include <memory> // shared_ptr
@@ -11,6 +10,8 @@
 #include <condition_variable>
 #include <thread>
 #include <memory>
+
+GCC_IGNORE_PUSH(-Wpadded)
 
 /*! @brief A class managing parallel, vectorized, cache-efficient calculation of a power spectrum H_l
  * 
@@ -79,7 +80,8 @@ class PowerSpectrum
 			
 			//! @brief Construct a vector of PhatF, normalizing f for the collection
 			template<class T>
-			static std::vector<PhatF> To_PhatF_Vec(std::vector<T> const& originalVec)
+			static std::vector<PhatF> To_PhatF_Vec(std::vector<T> const& originalVec, 
+				real_t const totalE_in = real_t(-1))
 			{
 				std::vector<PhatF> convertedVec;
 				
@@ -88,13 +90,21 @@ class PowerSpectrum
 				{
 					convertedVec.emplace_back(original);
 					totalE += convertedVec.back().f;
-				}
+				}		
+								
+				if(totalE_in > real_t(0))
+				{
+					assert(totalE <= totalE_in);
+					totalE = totalE_in;
+				}					
 				
 				for(auto& converted : convertedVec)
 					converted.f /= totalE;
 					
 				return convertedVec;
 			}
+			
+			static real_t fInner(std::vector<PhatF> const& particles);
 		};
 
 		/*! @brief A collection of PhatF (an object-of-vectors)
@@ -180,8 +190,10 @@ class PowerSpectrum
 				ShapedParticleContainer() {}
 			
 				ShapedParticleContainer(std::vector<ShapedJet> const& jets);
-				ShapedParticleContainer(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape = DiracDelta());
-				ShapedParticleContainer(std::vector<vec3_t> const& particles, ShapeFunction const& theirSharedShape = DiracDelta());
+				ShapedParticleContainer(std::vector<PhatF> const& particles, 
+					ShapeFunction const& theirSharedShape = h_Delta());
+				ShapedParticleContainer(std::vector<vec3_t> const& particles, 
+					ShapeFunction const& theirSharedShape = h_Delta());
 				//~ ~ShapedParticleContainer();
 				
 				// Warning; to get move semantics for shapeStore, 
@@ -189,7 +201,8 @@ class PowerSpectrum
 				ShapedParticleContainer(ShapedParticleContainer&&) = default;
 				ShapedParticleContainer& operator=(ShapedParticleContainer&&) = default;
 				
-				void append(std::vector<PhatF> const& particles, ShapeFunction const& theirSharedShape = DiracDelta());
+				void append(std::vector<PhatF> const& particles, 
+					ShapeFunction const& theirSharedShape = h_Delta());
 		};
 				
 	private:
@@ -245,7 +258,7 @@ class PowerSpectrum
 		*/ 
 		enum class TileType {DIAGONAL, CENTRAL, BOTTOM, RIGHT, FINAL};
 	
-			GCC_IGNORE(-Wpadded)
+			GCC_IGNORE_PUSH(-Wpadded)
 		//! @brief A tile is specified by its boundaries and type
 		struct TileSpecs
 		{
@@ -322,7 +335,7 @@ class PowerSpectrum
 				//! @brief Wait for job completion and return final Hl
 				std::vector<real_t> Get_Hl();
 		};
-			GCC_IGNORE_END
+			GCC_IGNORE_POP
 		
 		////////////////////////////////////////////////////////////////
 		// Several variables are necessary for managing the thread pool.
@@ -401,6 +414,13 @@ class PowerSpectrum
 		//! @brief Calculate the power spectrum for a set of particles
 		std::vector<real_t> Hl_Obs(size_t const lMax, 
 			ShapedParticleContainer const& particles);
+			
+		template<class particle_t>
+		std::vector<real_t> Hl_Obs(size_t const lMax, 
+			std::vector<particle_t> const& particles)
+		{
+			return Hl_Obs(lMax, ShapedParticleContainer(particles));
+		}		
 		
 		/*! @brief Calculate the power spectrum for a set of jets
 		 * 
@@ -425,11 +445,35 @@ class PowerSpectrum
 		 *  will be padded with -1., a nonsense value.
 		*/ 
 		static void WriteToFile(std::string const& filePath, 
-			std::vector<std::vector<real_t>> const& Hl_set);
+			std::vector<std::vector<real_t>> const& Hl_set,
+			std::string const& header = "");
 		
 		//! @brief Write a single power spectra to file.
 		static void WriteToFile(std::string const& filePath, 
-			std::vector<real_t> const& Hl);
+			std::vector<real_t> const& Hl, 
+			std::string const& header = "");
+			
+		
+		static real_t SmearedDistance_TrackTower(real_t const r);
+		
+		static real_t SmearedDistance_TowerTower(real_t const r);
+			
+		static real_t AngularResolution(std::vector<PhatF> const& tracks,
+			real_t const ff_fraction = real_t(1));
+		
+		static real_t AngularResolution(std::vector<PhatF> const& tracks, 
+			std::vector<PhatF> const& towers, real_t const squareWidth,
+			real_t const ff_fraction = real_t(1));
+			
+		static std::pair<std::vector<real_t>, std::vector<std::vector<real_t>>>
+			AngularCorrelation(std::vector<std::vector<real_t>> const& Hl_vec, 
+				size_t const zSamples = 2048);
+		
+		static void Write_AngularCorrelation(std::string const& filePath, 
+			std::vector<std::vector<real_t>> const& Hl_vec, size_t const zSamples = 2048, 
+			std::string const& header = "");
 };
+
+GCC_IGNORE_POP
 
 #endif

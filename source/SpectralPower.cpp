@@ -3,6 +3,7 @@
 #include "NjetModel.hpp"
 #include "kdp/kdpTools.hpp"
 #include "RecursiveLegendre.hpp"
+#include "kdp/kdpStdVectorMath.hpp"
 #include <array>
 #include <future>
 

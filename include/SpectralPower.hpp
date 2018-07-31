@@ -5,6 +5,10 @@
  *  @brief Tools to efficiently calculate the spectral power H_l (i.e. the Fox-Wolfram moments).
  *  @author Copyright (C) 2017 Keith Pedersen (Keith.David.Pedersen@gmail.com)
  *  @date August 2017
+ * 
+ *  This file is deprecated. I have implemented a much more general,
+ *  much faster set of codes in PowerSpectrum.hpp. 
+ *  I kept this around for validation and reference purposes.
 */
 
 #include "PowerJets.hpp"
@@ -134,7 +138,7 @@ class SpectralPower
 					std::array<real_t, incrementSize>& fProd_incr);
 		};
 		
-		GCC_IGNORE(-Wpadded)
+		GCC_IGNORE_PUSH(-Wpadded)
 		/*! @brief A settings container for PowerSpectrum
 		 * 
 		 *  Settings are read from a QSettings object (a parsed INI file),
@@ -157,7 +161,7 @@ class SpectralPower
 				lFactor(parsedINI.value("power/lFactor", false).toBool()),
 				nFactor(parsedINI.value("power/nFactor", false).toBool()) {}
 		};
-		GCC_IGNORE_END
+		GCC_IGNORE_POP
 		
 	private:
 		Outer_Increment outer; // Manages the generation of SOP increments.

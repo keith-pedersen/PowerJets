@@ -5,7 +5,7 @@
 #include "RecursiveLegendre.hpp"
 #include "kdp/kdpTools.hpp"
 
-GCC_IGNORE(-Wpadded)
+GCC_IGNORE_PUSH(-Wpadded)
 
 /*! @brief Calculate the on-axis coefficient for the particle shape function.
  * 
@@ -24,30 +24,61 @@ class ShapeFunction
 		using vec3_t = PowerJets::vec3_t;
 		using vec4_t = PowerJets::vec4_t;
 			
-		ShapeFunction() {}
-				
+	protected:
+		//~ ShapeFunction() {}
+		
 	public:
-		virtual ~ShapeFunction() {}
+		virtual ~ShapeFunction() = default;
 	
 		//! @brief Return h_l for the given l.
 		virtual real_t hl(size_t const l) const = 0;
 	
-		//! @brief Get the vector of on-axis coefficients for l=1 to l=lMax
+		/*! @brief Get the vector of on-axis coefficients for l=1 to l=lMax
+		 * 
+		 *  The whole point of this class is that repeating the recursion is
+		 *  better than trying to cache it --- generate a fresh vector each time. 
+		*/
 		std::vector<real_t> hl_Vec(size_t const lMax) const;
 		
 		virtual ShapeFunction* Clone() const = 0;
 };
 
-class DiracDelta : public ShapeFunction
+//! @brief A delta-distribution, whose "up" coefficient is always 1.
+class h_Delta : public ShapeFunction
 {
 	public:
-		DiracDelta() {}
-			
-			GCC_IGNORE(-Wunused)
+		h_Delta() {}			
+																						GCC_IGNORE_PUSH(-Wunused-parameter)
 		real_t hl(size_t const l) const final {return real_t(1);}
-			GCC_IGNORE_END
+																						GCC_IGNORE_POP		
+		ShapeFunction* Clone() const {return new h_Delta();}
+};
+
+/*! @brief Return the "up" coefficient measured in an experiment.
+ * 
+ *  This is useful when an empirical shape function is used (e.g. pileup).
+ * 
+ *  \throws Throws std::runtime_error when l exceeds lMax
+*/ 
+class h_Measured : public ShapeFunction
+{
+	private:
+		std::vector<real_t> hl_vec;
 		
-		ShapeFunction* Clone() const {return new DiracDelta();}
+		static std::vector<real_t> ReadFirstColumn(std::string const& filePath);
+	
+	public:
+		h_Measured(std::vector<real_t> const hl_in = std::vector<real_t>()):
+			hl_vec(hl_in) {}
+			
+		//! @brief Read hl from the first column of a file
+		h_Measured(std::string const& filePath):
+			h_Measured(ReadFirstColumn(filePath)) {}
+			
+		real_t hl(size_t l) const final;
+		size_t lMax() const {return hl_vec.size();}
+		
+		ShapeFunction* Clone() const final {return new h_Measured(hl_vec);}
 };
 
 /*! @brief Calculate the on-axis coefficient for the particle shape function.
@@ -68,10 +99,17 @@ class ShapeFunction_Recursive : public ShapeFunction
 		using vec4_t = PowerJets::vec4_t;
 		
 	protected:
-		mutable real_t hl_current;
+		// We can intercept trivial shapes before doing lots of work
+		enum class Shape {NonTrivial=0, Isotropic, Delta};
+		
 		mutable size_t l_current;
+		Shape shape;
+		mutable real_t hl_current;
 		mutable real_t twoLplus1;
 		std::vector<real_t> hl_init; // The first few coefficients. Filled by derived ctor and possibly reused by Reset
+		
+		bool IsTrivial() const {return bool(shape);}
+		real_t hl_trivial(size_t const l) const;
 		
 		virtual void Reset() const = 0; // Called to reset recursion. MUST be called by derived ctor
 		virtual void Next() const = 0; // Increment l and store h_l in hl_current
@@ -81,16 +119,14 @@ class ShapeFunction_Recursive : public ShapeFunction
 		ShapeFunction_Recursive();
 				
 	public:
-		virtual ~ShapeFunction_Recursive() {}
+		virtual ~ShapeFunction_Recursive() = default;
 	
 		//! @brief Return h_l for the given l. Advance l if necessary
 		real_t hl(size_t const l) const final;
-	
-		//~ virtual ShapeFunction* Clone() const = 0;
 };
 
 //! @brief A particle uniformly distributed across a 
-// circular cap of solid angle Omega = surfaceFraction * 4 Pi
+//! circular cap of solid angle Omega = surfaceFraction * 4 Pi
 class h_Cap : public ShapeFunction_Recursive
 {
 	protected:
@@ -101,12 +137,12 @@ class h_Cap : public ShapeFunction_Recursive
 		void Next() const;
 			
 	public:
-		h_Cap(real_t const surfaceFraction);
+		h_Cap(real_t const surfaceFraction = real_t(0)); // Default to delta-distribution
 		
 		ShapeFunction* Clone() const
 		{
 			return static_cast<ShapeFunction*>(new h_Cap(*this));
-		}		
+		}
 };
 
 /*! A shape function with an unstable recursion that can be 
@@ -117,48 +153,64 @@ class h_Unstable : public ShapeFunction_Recursive
 {
 	protected:
 		mutable real_t hl_last;
-		//~ real_t R_current;
 		mutable bool stable;
 		
-		virtual void Reset() const;		
-		virtual void Next() const;
-		virtual void Setup() = 0;
+		// When hl get small, the recursion becomes unstable.
+		// This seems to occur some time before 2^-(half the mantissa bits)
+		// for different shapes and different parameters
+		static constexpr real_t gettingSmall = 
+			std::exp2(real_t(-0.33 * std::numeric_limits<real_t>::digits));
 		
-		//! @brief The ratio of h_l / h_(l-1), to be used once h_l < threshold 
+		virtual void Reset() const; //!< @brief reset the recursion
+		virtual void Next() const; //!< @brief advance the recursion
+		virtual void Setup() = 0; //!< @brief setup the recursion
+		
+		//! @brief Detect when the recursion becomes unstable
+		virtual bool IsUnstable(real_t const hl_next) const = 0; 
+		
+		//! @brief The ratio of h_l / h_(l-1), to be used once hl becomes unstable
 		virtual real_t Asym_Ratio() const = 0;
 						
 		//! @brief Return the l + 1 coefficient
 		virtual real_t h_lp1() const = 0;
 		
-		virtual bool Isotropic() const = 0;
-		
-		//h_Unstable();
-		
 	public:
-		virtual ~h_Unstable() {}
+		virtual ~h_Unstable() = default;
 };
 
 //! @brief A particle distributed by a pseudo-Gaussian.
 class h_Gaussian : public h_Unstable
 {
 	private:
-		real_t lambda;
+		real_t lambda; // Keep around for calls to Lambda()
 		real_t lambda2;
 	
 	protected:
 		void Setup();
+		bool IsUnstable(real_t const hl_next) const;
 		
 		real_t Asym_Ratio() const;
-		real_t h_lp1() const;
-		bool Isotropic() const;
+		real_t h_lp1() const;		
 		
 	public:
-		h_Gaussian(real_t const lambda_in);
+		//! @brief Construct a pseudo-normal with a given lambda (default to delta-distribution)
+		h_Gaussian(real_t const lambda_in = real_t(0));
+		
+		//! @brief Construct a pseudo-normal where a circular cap of radius R
+		//! contains a fraction u of the particle
+		h_Gaussian(real_t const R, real_t const u);
 		
 		ShapeFunction* Clone() const
 		{
 			return static_cast<ShapeFunction*>(new h_Gaussian(*this));
 		}
+		
+		real_t Lambda() const {return lambda;}
+		
+		/*! @brief Solve for the lambda where a fraction u of the distribution
+		 *  occupies a circular cap of given radius.
+		*/ 
+		static real_t SolveLambda(real_t const R, real_t const u);
 };
 
 //! @brief A scalar decay boosted into the lab frame.
@@ -168,15 +220,19 @@ class h_Boost : public h_Unstable
 		real_t m2;
 		real_t p2;
 		real_t beta;
+		// The asymptotic ratio of adjacent values stabilizes to beta / (1 + sqrt(1-beta**2))
+		// We can detect instability by detecting h_next / h_current dropping below this ratio
+		real_t R_asym;
 	
 	protected:
 		void Setup();
+		bool IsUnstable(real_t const hl_next) const;
 		
 		real_t Asym_Ratio() const;
 		real_t h_lp1() const;
-		bool Isotropic() const;
 		
 	public:
+		h_Boost(); // Default to delta-distribution
 		h_Boost(vec3_t const& p3, real_t const mass);
 		
 		ShapeFunction* Clone() const
@@ -185,100 +241,6 @@ class h_Boost : public h_Unstable
 		}
 };
 
-GCC_IGNORE_END
-
-
-//! @brief A scalar decay boosted into the lab frame, 
-//  but forgetting to account for the energy transformation
-//~ class h_Boost_orig : public h_Unstable
-//~ {
-	//~ private:
-		//~ real_t beta;
-	
-	//~ protected:
-		//~ void Setup(size_t const lMax) const;		
-		//~ real_t Asym_Ratio() const;	
-		//~ real_t NotIsotropic() const;		
-		//~ void h_lp1() const;
-		
-	//~ public:
-		//~ h_Boost_orig(vec3_t const& p3, real_t const mass);
-//~ };
-
-
-		
-//~ //! @brief The recursive half-power of the particle smeared in Gaussian angle for l=0 to l=lMax
-//~ template <typename real_t>
-//~ std::vector<real_t> Q_l(size_t const lMax, real_t const lambda, 
-	//~ real_t const threshold = real_t(1e-6))
-//~ {
-	//~ real_t const lambda2 = kdp::Squared(lambda);
-	
-	//~ std::vector<real_t> Q;
-	//~ Q.resize(lMax + 1, real_t(0)); // Fill with zeroes
-	
-	//~ Q[0] = real_t(1);	
-		
-	//~ if(lambda < 1e3) // Otherwise, the smear angle is so large Q[1] is numerically unstable
-	//~ {
-		//~ // 1/tanh(1/lambda**2) = (1 + exp(-2/lambda**2))/(1 - exp(-2/lambda**2))
-		//~ // (1 + exp(-x))/(1-exp(-x)) = 1 + 2*exp(-x)/(1-exp(-x) = 1 + 2/(exp(x)-1)
-		//~ // Note that (1-x)*(1+x) is more accurate when x > 0.5, and 1-x**2 when x < 0.5
-		//~ // When lambda**2 > 0.5 * 1/tanh(2/lambda**2), we should do it the first way
-		//~ // This occurs when lambda2 is about 0.5
-		
-		//~ if(lambda2 > real_t(0.5))
-			//~ Q[1] = real_t(1)/std::tanh(real_t(1)/lambda2) - lambda2;
-		//~ else
-			//~ Q[1] = kdp::Diff2(real_t(1), lambda) + real_t(2)/std::expm1(real_t(2)/lambda2);
-		
-		//~ // l = 1, emplace l + 1 every iteration
-		//~ size_t l = 1;
-		//~ real_t twoLplus1 = real_t(3); // 2*1 + 1
-		
-		//~ bool stable = true;
-		
-		//~ while(l < lMax)
-		//~ {
-			//~ if(stable)
-			//~ {
-				//~ Q[l+1] = -twoLplus1*lambda2*Q[l] + Q[l-1];
-				
-				//~ assert(Q[l+1] > real_t(0));
-				//~ if(Q[l+1] < threshold)
-					//~ stable = false; // Switch to stable within this iteration
-			//~ }
-			
-			//~ // This needs to be done after stable recusion, 
-			//~ // but before unstable recursion, because Q_l = R(l) * Q_l-1
-			//~ twoLplus1 += real_t(2);
-			//~ ++l;
-			
-			//~ if(not stable)
-			//~ {
-				//~ real_t const term = twoLplus1 * lambda2;
-				//~ real_t const R_l = real_t(2)/(term + std::sqrt(kdp::Squared(term) + real_t(4)));
-				
-				//~ Q[l] = R_l * Q[l-1];
-				//~ if(Q[l] == real_t(0))
-					//~ break;
-			//~ }
-		//~ }
-	//~ }
-	
-	//~ return Q;
-//~ }
-
-//~ template <typename real_t>
-//~ std::vector<real_t> Q_l_squared(size_t const lMax, real_t const lambda, 
-	//~ real_t const threshold = real_t(1e-6))
-//~ {
-	//~ std::vector<real_t> Q = Q_l(lMax, lambda, threshold);
-	
-	//~ for(auto& Q_l : Q)
-		//~ Q_l = kdp::Squared(Q_l);
-		
-	//~ return Q;
-//~ }
+GCC_IGNORE_POP
 
 #endif

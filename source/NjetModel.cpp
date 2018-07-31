@@ -33,15 +33,15 @@ p4(w0, p3_in, w0type) // This will catch invalid w0 and throw exceptions
 			mass = w0;
 		break;
 		
-		case kdp::Vec4from2::Boost_preserve_p3:
-		case kdp::Vec4from2::Boost_preserve_E:
-			mass = p4.x0 / w0;
-		break;
+		//~ case kdp::Vec4from2::Boost_preserve_p3:
+		//~ case kdp::Vec4from2::Boost_preserve_E:
+			//~ mass = p4.x0 / w0;
+		//~ break;
 		
-		case kdp::Vec4from2::BoostMinusOne_preserve_p3:
-		case kdp::Vec4from2::BoostMinusOne_preserve_E:
-			mass = p4.x0 / (w0 + real_t(1));
-		break;
+		//~ case kdp::Vec4from2::BoostMinusOne_preserve_p3:
+		//~ case kdp::Vec4from2::BoostMinusOne_preserve_E:
+			//~ mass = p4.x0 / (w0 + real_t(1));
+		//~ break;
 	}
 }
 
@@ -53,7 +53,7 @@ void ShapedJet::SampleShape(incrementArray_t& z_lab, incrementArray_t& y_lab,
 	// We will boost z_CM into the lab frame
 	// We assume boost collimates particles towards +z axis in the lab
 	real_t const gamma2 = kdp::Squared(p4.x0 / mass);
-	real_t const beta = vec4_t::BetaFrom_Mass_pSquared(mass, p4.p().Mag2());
+	real_t const beta = vec4_t::Beta(p4.p(), mass);
 	
 	static constexpr size_t subIncrement = (incrementSize / 2);
 	
@@ -158,7 +158,7 @@ void ShowerParticle::Split(param_iter_t const param_begin, param_iter_t param_en
 	vec3_t p3_b(p3_a);
 	vec3_t newPol(false);
 	
-				GCC_IGNORE(-Wfloat-equal)			
+				GCC_IGNORE_PUSH(-Wfloat-equal)			
 	// Find how much of p3_b is parallel to p3_a
 	{
 		// If pSquared == 0, then b = inf, and b * p() == nan 
@@ -172,7 +172,7 @@ void ShowerParticle::Split(param_iter_t const param_begin, param_iter_t param_en
 		
 		p3_b *= r;
 	}
-				GCC_IGNORE_END
+				GCC_IGNORE_POP
 	
 	// Inside this scope there are three calls to Normalize()
 	// The last two are crucial, the first one perhaps not so much.
@@ -227,7 +227,7 @@ void ShowerParticle::MakeDaughters(vec3_t const& p3_b,
 	//~ b = std::shared_ptr<ShowerParticle>(new ShowerParticle(this, p3_b, u_b * mass, newPol));
 	//~ c = std::shared_ptr<ShowerParticle>(new ShowerParticle(this, p4.p() - p3_b, uSum * mass - b->mass, newPol));
 	
-					GCC_IGNORE(-Wfloat-equal)			
+					GCC_IGNORE_PUSH(-Wfloat-equal)			
 	/* With floating point arithmetic, we can guarantee that
 	 * 	(larger - smaller) + smaller = larger
 	 * So because we defined p_c by subtraction, we can guarantee momentum conservation.
@@ -236,7 +236,7 @@ void ShowerParticle::MakeDaughters(vec3_t const& p3_b,
 	 * and these *should* add up to the original mass, but there is no guarantee
 	*/
 	inexact = (EnergyLoss_unsafe() not_eq real_t(0));
-					GCC_IGNORE_END
+					GCC_IGNORE_POP
 			
 	//~ printf("%.16e, %.16e\n", sum.x0, p4.x0);
 	//~ printf("%.16e\n", kdp::RelDiff(sum.x0, p4.x0));

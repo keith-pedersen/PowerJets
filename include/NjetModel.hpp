@@ -92,14 +92,14 @@ class ShapedJet : public Jet
 		// We assume that all shape parameters will be passed from a std::vector<real_t>
 		using param_iter_t = std::vector<real_t>::const_iterator;
 		
-			GCC_IGNORE(-Wunused-parameter)
+			GCC_IGNORE_PUSH(-Wunused-parameter)
 		/*! @brief The azimuthally symmetric jet shape function.
 		 *
 		 *  A normalized PDF for \p z_CM = cos(theta_CM), the CM-frame polar angle
 		 *  (with the +z direction defined by jet's lab-frame 3-momentum).
 		*/
 		real_t h_CM(real_t const z_CM) const {return real_t(0.5);}
-			GCC_IGNORE_END
+			GCC_IGNORE_POP
 		
 		/*! @brief Randomly sample the jet's shape in the lab frame, via unit vectors.
 		 * 
@@ -122,7 +122,7 @@ class ShapedJet : public Jet
 		// The don't initialize constructor
 		explicit ShapedJet(bool): Jet(false), shape(p4.p(), real_t(1)) {}
 		
-			GCC_IGNORE(-Wunused-parameter)
+			GCC_IGNORE_PUSH(-Wunused-parameter)
 		ShapedJet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type,
 			std::vector<bool> address_in = std::vector<bool>(),
 			std::vector<real_t> const& shapeParams = {}):
@@ -138,7 +138,7 @@ class ShapedJet : public Jet
 		Jet(x1, x2, x3, w0, w0type),
 		address(std::move(address_in)),
 		shape(p4.p(), mass) {}
-			GCC_IGNORE_END
+			GCC_IGNORE_POP
 		
 		// We assume that the shape of the jet will be initialized later, 
 		// after the jet's 4-vector and mass have been defined.
@@ -155,7 +155,7 @@ class ShapedJet : public Jet
 		bool operator < (ShapedJet const& that) const;
 };
 
-GCC_IGNORE(-Wpadded)
+GCC_IGNORE_PUSH(-Wpadded)
 
 // This class is a C++ implementation of particleJet_mk3.py
 
@@ -382,7 +382,7 @@ class ShowerParticle : public ShapedJet
 		real_t Total_absElost(real_t const absElost_in = real_t(0));
 };
 
-GCC_IGNORE_END
+GCC_IGNORE_POP
 
 /*! @brief Calculate the spectral power H_l for an n-jet model.
  * 

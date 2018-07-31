@@ -2,6 +2,7 @@
 #include "PowerSpectrum.hpp"
 #include "RecursiveLegendre.hpp"
 #include "ShapeFunction.hpp"
+#include "kdp/kdpStdVectorMath.hpp"
 #include <future>
 
 ////////////////////////////////////////////////////////////////////////
@@ -37,7 +38,19 @@ PowerSpectrum::PhatF::PhatF(real_t const px, real_t const py, real_t const pz, r
 ////////////////////////////////////////////////////////////////////////
 
 PowerSpectrum::PhatF::PhatF(Pythia8::Particle const& particle):
-	PhatF(particle.px(), particle.py(), particle.pz(), particle.e()) {}			
+	PhatF(particle.px(), particle.py(), particle.pz(), particle.e()) {}
+	
+////////////////////////////////////////////////////////////////////////
+	
+PowerSpectrum::real_t PowerSpectrum::PhatF::fInner(std::vector<PhatF> const& particles)
+{
+	real_t f2 = real_t(0);
+	
+	for(auto const& particle : particles)
+		f2 += kdp::Squared(particle.f);
+		
+	return f2;
+}
 
 ////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
@@ -860,7 +873,9 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Hybrid(size_t const lMax,
 	// (and so we construct the ShapedParticleContainer while something else is running).
 	if(recalculate_Obs)
 	{
-		Hl_Obs_future = std::async(std::launch::async, &PowerSpectrum::Hl_Obs, this, 
+		Hl_Obs_future = std::async(std::launch::async, 
+		static_cast<std::vector<real_t>(PowerSpectrum::*)(size_t const,
+			ShapedParticleContainer const&)>(&PowerSpectrum::Hl_Obs), this, 
 			lMax, std::cref(particles));
 	}
 	else
@@ -906,9 +921,11 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Hybrid(size_t const lMax,
 }
 
 void PowerSpectrum::WriteToFile(std::string const& filePath,
-	std::vector<std::vector<real_t>> const& Hl_set)
+	std::vector<std::vector<real_t>> const& Hl_set, std::string const& header)
 {
 	std::ofstream file(filePath, std::ios::trunc);
+	
+	file << "#" << header << "\n";
 	
 	size_t const lMax = [&]()
 	{
@@ -920,8 +937,8 @@ void PowerSpectrum::WriteToFile(std::string const& filePath,
 		return maxSize;
 	}();
 	
-	constexpr char const* l_format = "%4lu ";
-	constexpr char const* Hl_format = "%.8e ";
+	constexpr char const* l_format = "%5lu ";
+	constexpr char const* Hl_format = "%.16e ";
 	
 	if(not file.is_open())
 		throw std::ios::failure("PowerSpectrum::WriteToFile: File cannot be opened for write: " + filePath);
@@ -957,10 +974,193 @@ void PowerSpectrum::WriteToFile(std::string const& filePath,
 }
 
 void PowerSpectrum::WriteToFile(std::string const& filePath,
-	std::vector<real_t> const& Hl)
+	std::vector<real_t> const& Hl, std::string const& header)
 {
 	std::vector<std::vector<real_t>> const Hl_set = {Hl};
-	PowerSpectrum::WriteToFile(filePath, Hl_set);
+	PowerSpectrum::WriteToFile(filePath, Hl_set, header);
+}
+
+/* The next two functions use parameters determined from fits to MonteCarlo integration. 
+ * See the PowerJets paper for a full explanation of these fits 
+*/ 
+PowerSpectrum::real_t PowerSpectrum::SmearedDistance_TrackTower(real_t const r)
+{
+	static constexpr real_t f0 = 0.667;
+	static constexpr real_t b = 2.38;
+	
+	return std::pow(std::pow(f0, b) + std::pow(r, b), real_t(1)/b);	
+}
+
+PowerSpectrum::real_t PowerSpectrum::SmearedDistance_TowerTower(real_t const r)
+{
+	static constexpr real_t f0 = 0.641;
+	static constexpr real_t b = 2.29;
+	
+	return std::pow(std::pow(f0, b) + std::pow(r, b), real_t(1)/b);
+}
+
+PowerSpectrum::real_t PowerSpectrum::AngularResolution(std::vector<PhatF> const& tracks, 
+	real_t const ff_fraction)
+{
+	return AngularResolution(tracks, std::vector<PhatF>(), real_t(1), ff_fraction);
+}
+
+PowerSpectrum::real_t PowerSpectrum::AngularResolution(std::vector<PhatF> const& tracks,
+	std::vector<PhatF> const& towers, real_t const squareWidth, 
+	real_t const ff_fraction)
+{
+	if((tracks.size() + towers.size()) < 3)
+	{
+		if((tracks.size() + towers.size()) == 2)
+			return M_PI;
+		else
+			return INFINITY;
+	}
+	else
+	{	
+		using angleWeight = std::pair<real_t, real_t>;
+		
+		std::vector<angleWeight> angleVec;		
+		real_t ff = 0.;
+		
+		// 2 pi (1-cos(thetaR)) = (squareWidth)**2 ==>? sin(thetaR/2)**2 = (squareWidth)**2/(4*Pi)
+		double twrRadius = real_t(2)*std::asin(real_t(0.5)*squareWidth/std::sqrt(M_PI));
+		double twoTwrRadius = std::sqrt(real_t(2))*twrRadius; // radii add in quadrature
+		
+		for(size_t trk = 0; trk < tracks.size(); ++trk)
+		{
+			ff += kdp::Squared(tracks[trk].f);
+			
+			for(size_t trk_other = 0; trk_other < trk; ++trk_other)
+			{
+				angleVec.emplace_back(
+					// No smearing between tracks; assume very well measured
+					tracks[trk].pHat.InteriorAngle(tracks[trk_other].pHat),
+					tracks[trk].f * tracks[trk_other].f);
+			}
+			
+			for(size_t twr = 0; twr < towers.size(); ++twr)
+			{
+				angleVec.emplace_back(
+					twrRadius * SmearedDistance_TrackTower(
+						tracks[trk].pHat.InteriorAngle(towers[twr].pHat)/twrRadius),
+					tracks[trk].f * towers[twr].f);
+			}		
+		}
+		
+		for(size_t twr = 0; twr < towers.size(); ++twr)
+		{
+			ff += kdp::Squared(towers[twr].f);
+			
+			for(size_t twr_other = 0; twr_other < twr; ++twr_other)
+			{
+				angleVec.emplace_back(
+					twoTwrRadius * SmearedDistance_TowerTower(
+						towers[twr].pHat.InteriorAngle(towers[twr_other].pHat)/twoTwrRadius),
+					towers[twr].f * towers[twr_other].f);
+			}
+		}
+		
+		std::sort(angleVec.begin(), angleVec.end(), 
+			[](angleWeight const& left, angleWeight const& right){return left.first < right.first;});
+			
+		real_t weight = real_t(0);
+		real_t const weight_target = real_t(0.5) * ff * ff_fraction; // half because each distance appears twice in the expansion
+		real_t geoMean = real_t(0);
+		
+		size_t i = 0;
+		
+		for(; (i < angleVec.size()) and (weight < weight_target); ++i)
+		{
+			geoMean += angleVec[i].second * std::log(angleVec[i].first);
+			weight += angleVec[i].second;
+		}
+		
+		assert(i < angleVec.size());	
+		
+		return std::exp(geoMean / weight);
+	}
+}
+
+std::pair<std::vector<PowerSpectrum::real_t>, std::vector<std::vector<PowerSpectrum::real_t>>>
+PowerSpectrum::AngularCorrelation(std::vector<std::vector<real_t>> const& Hl_vec, 
+	size_t const zSamples)
+{
+	using vec_t = std::vector<real_t>;
+	RecursiveLegendre_Increment<vec_t> Pl_computer;
+
+	for(size_t i = 0; i < zSamples; ++i)
+		Pl_computer.z.emplace_back(real_t(-1) + ((real_t(i) + real_t(0.5)) * real_t(2)) / real_t(zSamples));
+	assert(Pl_computer.z.size() == zSamples);
+	
+	// Accumulate A(z) for each Hl, default emplacing l=0	
+	std::vector<vec_t> A_vec(Hl_vec.size(), vec_t(zSamples, real_t(1)));
+	
+	size_t const lMax = [&]()
+	{
+		std::vector<size_t> lMax_vec;
+		
+		for(auto const& Hl : Hl_vec)
+			lMax_vec.emplace_back(Hl.size());
+			
+		return *(std::max_element(lMax_vec.begin(), lMax_vec.end()));
+	}();
+	
+	if(A_vec.size())
+	{
+		Pl_computer.Reset(); // l = 1
+		assert(Pl_computer.l() == 1);
+		
+		for(size_t l = 1; l <= lMax; ++l)
+		{
+			real_t const twoLp1 = real_t(2*l + 1);
+			
+			for(size_t i = 0; i < Hl_vec.size(); ++i)
+			{
+				vec_t const& Hl = Hl_vec[i];
+				vec_t& A = A_vec[i];
+				
+				real_t const C_l = twoLp1 * ((l < Hl.size()) ? Hl[l-1] : real_t(0));				
+				
+				for(size_t k = 0; k < zSamples; ++k)
+					A[k] += C_l * Pl_computer.P_l()[k];
+			}
+			
+			Pl_computer.Next();
+		}
+	}
+	
+	return {Pl_computer.z, A_vec};
+}
+
+void PowerSpectrum::Write_AngularCorrelation(std::string const& filePath, 
+	std::vector<std::vector<real_t>> const& Hl_vec, size_t const zSamples, 
+	std::string const& header)
+{
+	std::ofstream file(filePath, std::ios::trunc);
+	char buff[1024];
+	
+	if(not file.is_open())
+		throw std::ofstream::failure("Cannot open: <" + filePath + "> for writing");
+	else
+	{
+		file << "# " << header << "\n";
+		
+		auto const series = AngularCorrelation(Hl_vec, zSamples);
+		
+		for(size_t i = 0; i < series.first.size(); ++i)
+		{
+			sprintf(buff, "%.16e", series.first[i]);
+			file << buff;
+			
+			for(size_t k = 0; k < Hl_vec.size(); ++k)
+			{
+				sprintf(buff, "  %.16e", series.second[k][i]);
+				file << buff;
+			}
+			file << "\n";
+		}
+	}
 }
 
 /* Previously I used two methods to launch threads in worker functions (not ctor)

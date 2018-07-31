@@ -1,6 +1,9 @@
 #include "ArrogantDetector.hpp"
 #include <stdexcept>
+//~ #include <algorithm> // is_sorted, upper_bound
 #include <assert.h>
+
+////////////////////////////////////////////////////////////////////////
 
 ArrogantDetector::Settings::Settings(QSettings const& parsedINI, std::string const& detectorName)
 {
@@ -8,15 +11,18 @@ ArrogantDetector::Settings::Settings(QSettings const& parsedINI, std::string con
 	squareWidth = kdp::ReadAngle<double>(parsedINI.value(
 		(detectorName + "/squareWidth").c_str(), squareWidth_default).toString().toStdString());
 		
-	// Round it so that there are an even number of towers in the central band.
-	numPhiBins_centralBand = 2*towerID_t(std::round(M_PI/squareWidth));
-
-	// Now use this integer to define the actual squareWidth
-	squareWidth = (2.*M_PI)/double(numPhiBins_centralBand);
+	evenTowers = parsedINI.value((detectorName + "/evenTowers").c_str(), true).toBool();
+		
+	// Now round squareWidth to fit around the circle
+	squareWidth = PhiSpec(squareWidth, evenTowers).DeltaPhi();
 	
 	etaMax_cal = Read_double(parsedINI, detectorName, "etaMax_cal", etaMax_cal_default);
 	etaMax_track = Read_double(parsedINI, detectorName, "etaMax_track", etaMax_track_default);
-	minTrackPT = Read_double(parsedINI, detectorName, "minTrackPT", minTrackPT_default);
+	
+	if(etaMax_track > etaMax_cal)
+		throw std::runtime_error("ArrogantDetector: cannot track beyond edge of calorimeter (i.e. must find etaMax_track <= etaMax_cal).");
+	
+	minTrackPT = Read_double(parsedINI, detectorName, "minTrackPT", minTrackPT_default);	
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -31,14 +37,39 @@ double ArrogantDetector::Settings::Read_double
 ////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
-ArrogantDetector::ArrogantDetector(QSettings const& parsedINI,
-	std::string const& detectorName):
-settings(parsedINI, detectorName), clearME(true) {}
-		
+ArrogantDetector::RawTower::RawTower(Edges&& edges, double const energy_in):
+	Edges(edges), energy(energy_in) {}
+
+////////////////////////////////////////////////////////////////////////	
+	
+void ArrogantDetector::RawTower::FlipZ()
+{
+	std::swap(eta_lower, eta_upper);
+	eta_lower = -eta_lower;
+	eta_upper = -eta_upper;
+}
+			
+////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
-ArrogantDetector::~ArrogantDetector() {}
-			
+ArrogantDetector::PhiSpec::PhiSpec(double const deltaPhi_target, bool forceEven)
+{
+	double const numTowers_f = forceEven ? 
+		2.*std::max(1., std::round(M_PI / deltaPhi_target)) : 
+		std::max(1., std::round(2.*(M_PI / deltaPhi_target)));
+		
+	deltaPhi = 2.*(M_PI / numTowers_f);
+	numTowers = towerID_t(numTowers_f);
+}
+
+////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
+
+ArrogantDetector::ArrogantDetector(QSettings const& parsedINI,
+	std::string const& detectorName):
+settings(parsedINI, detectorName), 
+numBelts(0), tooBigID(0), finalized(true) {}
+		
 ////////////////////////////////////////////////////////////////////////
 
 ArrogantDetector* ArrogantDetector::NewDetector(QSettings const& parsedINI, 
@@ -58,355 +89,336 @@ ArrogantDetector* ArrogantDetector::NewDetector(QSettings const& parsedINI,
 		throw std::runtime_error("ArrogantDetector: only type containing \"lep\" of \"had\" is supported!");
 }
 
-////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////
 
-double ArrogantDetector::PolarFromAbsEta(double const absEta) const
+size_t ArrogantDetector::NumTowers() const
 {
-	// To translate \p absEta to the polar angle \a t using only AbsPolarAngle(),
-	// we create a dummy 3-vector. This hack is slow but acceptable since 
-	// it is only used during initialization in Init_inDerivedCTOR().
+	size_t numTowers = 0;
 	
-	return AbsPolarAngle(vec3_t(1., std::fabs(absEta), 0., kdp::Vec3from::LengthEtaPhi));
-}
-
-////////////////////////////////////////////////////////////////////////
-
-double ArrogantDetector::EtaFromAbsPolar(double const absPolar) const
-{
-	// To translate absPolar to pseudorapidity, we create a dummy 3-vector
-	// This hack is slow but acceptable since it is only used during initialization	
-	double const absTheta = ToAbsTheta(absPolar);
-	
-	return vec3_t(std::cos(absTheta), 0., std::sin(absTheta)).Eta();
-}
-
-////////////////////////////////////////////////////////////////////////
-
-double ArrogantDetector::EtaMaxToPolarMax(double const etaMax) const
-{
-	// Convert eta to polar angle
-	double polarMax = kdp::RoundToNearestPitch(PolarFromAbsEta(etaMax), settings.squareWidth);
-	
-	// Make sure there is a beam hole.
-	if(polarMax >= polarMax_geometric)
-		polarMax -= settings.squareWidth;
-	assert(polarMax < polarMax_geometric);
+	for(size_t beltIndex = 0; beltIndex < numBelts; ++beltIndex)
+		numTowers += DeltaPhi(beltIndex).NumTowers();
 		
-	return polarMax;
+	return 2*numTowers;
 }
 
-////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////
 
+// This function makes a lot of assumptions about how things are supposed to be.
+// It assumes that the author of a derived class has read all the documentation
+// about the responsibilities of a derived class.
 void ArrogantDetector::Init_inDerivedCTOR()
 {
-	// Initialize ID
-	tooBigID = NumTowerBands() * settings.numPhiBins_centralBand;
+				GCC_IGNORE_PUSH(-Wfloat-equal)
+	/////////////////////////////////////////////////////////////////////	
+	// Sanity checks on beltEdges_eta
 	
-	// Initialize polarMax
-	polarMax_geometric = AbsPolarAngle(vec3_t(0., 0., 1.));
+	// It should be filled ...
+	if(beltEdges_eta.empty())
+		throw std::runtime_error("ArrogantDetector: No calorimeter possible with supplied parameters (or derived ctor did not setup).");
+	
+	// ... and should be in the correct format (lower edges, sorted, unique)
+	// any other format is a bug that needs repairing 
+	// (i.e. the derived ctor should be passing only the correct format, 
+	//  and it has the discretion to issue a runtime_error if something doesn't make sense).
+	assert(beltEdges_eta.front() == 0.);
+	assert(std::is_sorted(beltEdges_eta.cbegin(), beltEdges_eta.cend()));
+	assert(std::adjacent_find(beltEdges_eta.begin(), beltEdges_eta.end()) == beltEdges_eta.end());
+	assert(beltEdges_eta.back() <= settings.etaMax_cal);
 		
-	polarMax_cal = EtaMaxToPolarMax(settings.etaMax_cal);
-	polarMax_track = EtaMaxToPolarMax(settings.etaMax_track);
+	/////////////////////////////////////////////////////////////////////
+	// The last beltEdge is the uper-bound on the last belt (etaMax_cal)
+	numBelts = beltEdges_eta.size() - 1;
+	tooBigID = numBelts * maxTowersPerBelt;
 	
-	// Account for tiny little rounding errors near the edge of the detector.
-	// These can cause (absPolarAngle < polarMax_cal) to return a polarIndex one-too-large
+	/////////////////////////////////////////////////////////////////////
+	// Sanity checks on etaMax, PhiWidth and NumPhiBins
+	assert(settings.etaMax_track <= settings.etaMax_cal); // Should be enforced by Settings ctor
+	
+	// The control logic is not designed to accommodate a beam hole,
+	// nor is such a detector even remotely possible.
+	if(std::isinf(settings.etaMax_cal))
+		throw std::runtime_error("ArrogantDetector: etaBins MUST have a beam hole (use finalState for truth level information).");
+	
+	for(towerID_t beltIndex = 0; beltIndex < numBelts; ++beltIndex)
 	{
-		size_t count = 0; // More readable than a for loop
-
-		// Usually, one pass through the loop is enough 
-		while(GetPolarIndex(std::nextafter(polarMax_cal, 0.)) == NumTowerBands())
-		{
-			polarMax_cal = std::nextafter(polarMax_cal, 0.); // Move one float closer to zero
-			
-			if(++count > 10) throw std::runtime_error("ArrogantDetector: stuck in loop");
-		}
+		PhiSpec const& belt = DeltaPhi(beltIndex);
+		
+		assert(belt.DeltaPhi() > 0.);
+		assert(belt.NumTowers() > 1);
+		assert(belt.NumTowers() <= maxTowersPerBelt);
 	}
-				GCC_IGNORE(-Wfloat-equal)
-	// Account for the same rounding error when the tracker covers the whole detector
+	
+	/////////////////////////////////////////////////////////////////////	
+	// Now map eta to tanTheta, for use in PartialFill(vectors ...)
+	// Since PartialFill will determine positions from tanTheta, 
+	// we should map our tanTheta back to eta so there's a 
+	// perfect floating point correspondence between eta and tanTheta.
+	// NOTE: reserving vector size is pointless; they aren't large enough or filled often enough
+	
+	for(double& eta : beltEdges_eta)
+	{
+		beltEdges_tanTheta.push_back(Eta_to_TanTheta(eta));
+		eta = TanTheta_to_Eta(beltEdges_tanTheta.back());
+	}
+	assert(beltEdges_tanTheta.size() == beltEdges_eta.size());
+	
+	tanThetaMax_cal = beltEdges_tanTheta.back();
+	settings.etaMax_cal = TanTheta_to_Eta(tanThetaMax_cal);
+	
+	/////////////////////////////////////////////////////////////////////
+	// Also double-map the maximum eta for tracks
+	settings.etaMax_track = TanTheta_to_Eta(Eta_to_TanTheta(settings.etaMax_track));
+	
+	if(settings.etaMax_track > settings.etaMax_cal) // Correct rounding error
+		settings.etaMax_track = settings.etaMax_cal;
+	
+	/////////////////////////////////////////////////////////////////////
+	// Set tanThetaMax_track
+	// Only track the whole calorimeter when the two etaMax are equal
 	if(settings.etaMax_track == settings.etaMax_cal)
-		polarMax_track = polarMax_cal;
-				GCC_IGNORE_END
-		
-	assert(GetPolarIndex(std::nextafter(polarMax_track, 0.)) < NumTowerBands());
-	
-	settings.etaMax_cal = EtaFromAbsPolar(polarMax_cal);
-	settings.etaMax_track = EtaFromAbsPolar(polarMax_track);
-}
-
-////////////////////////////////////////////////////////////////////////
-
-void ArrogantDetector::SanityCheck_inDerivedCTOR()
-{
-	assert(polarMax_track <= polarMax_cal);
-	
-	towerID_t const polarIndex_CalEnd = NumTowerBands();
-	
-	// Ensure that polarMax_cal - epsilon has a valid polar index
-	assert(GetPolarIndex(std::nextafter(polarMax_cal, 0.)) < polarIndex_CalEnd);
-	
-	// Ensure that phi is mapped properly
-	for(towerID_t polarIndex = 0; polarIndex < polarIndex_CalEnd ; ++polarIndex)
+		tanThetaMax_track = tanThetaMax_cal;
+	else // Shift tracking to the belt whose upper edge is smaller than etaMax_track
 	{
-		assert(PhiWidth(polarIndex) >= settings.squareWidth);
-		assert(NumPhiBins(polarIndex) <= settings.numPhiBins_centralBand);
+		// upper_bound finds the first edge greater than etaMax_track, 
+		// so we subtract one to find the first edge less than
+		towerID_t edgeIndex = 
+			towerID_t(std::upper_bound(beltEdges_eta.begin(), beltEdges_eta.end(), 
+				settings.etaMax_track) - beltEdges_eta.begin()) - 1;
+			
+		assert(edgeIndex < numBelts);
 		
-		assert(GetPhiIndex(std::nextafter(M_PI, 0.), polarIndex) < settings.numPhiBins_centralBand);
+		// They two values are at the same index
+		settings.etaMax_track = beltEdges_eta[edgeIndex];
+		tanThetaMax_track = beltEdges_tanTheta[edgeIndex];
 	}
+	assert(tanThetaMax_track <= tanThetaMax_cal);	
+	
+	/////////////////////////////////////////////////////////////////////	
+	// Now for each belt, calculate the fractionalSolidAngle (same for each tower)
+	// and the prototype (phi=0) tower vec3 (simply rotate the
+	// transverse component to each tower's actual phi).
+	double theta_lower = 0.;
+	
+	for(towerID_t belt_iPlus1 = 1; belt_iPlus1 < beltEdges_tanTheta.size(); ++belt_iPlus1)
+	{
+		double const theta_upper = std::atan(beltEdges_tanTheta[belt_iPlus1]);
+		
+		{
+			double const deltaTheta = theta_upper - theta_lower;
+			double const thetaSum = theta_lower + theta_upper;
+			double const halfDeltaPhi = 0.5 * DeltaPhi(belt_iPlus1-1);
+			
+			fractionalArea.emplace_back(halfDeltaPhi
+				* (std::cos(0.5 * thetaSum)
+				* std::sin(0.5 * deltaTheta)) / M_PI);
+				
+			towerPrototype.emplace_back(false); // don't initialize
+			vec3_t& prototype = towerPrototype.back();
+		
+			double const sinDeltaTheta = std::sin(deltaTheta);
+		
+			/// Transverse term
+			prototype.x2 = prototype.x1 = 
+				std::sin(halfDeltaPhi) * 
+				(deltaTheta + std::cos(thetaSum)*sinDeltaTheta);
+			// Longitudinal term
+			prototype.x3 = halfDeltaPhi * sinDeltaTheta * std::sin(thetaSum);
+		}
+		
+		theta_lower = theta_upper; // Move to next belt
+	}	
+			GCC_IGNORE_POP // -Wfloat-equal
+	
+	Clear();
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-ArrogantDetector::towerID_t ArrogantDetector::NumTowerBands() const
+ArrogantDetector::TowerIndices::TowerIndices(TowerID towerID):
+	beltIndex(towerID/maxTowersPerBelt), phiIndex(towerID - beltIndex*maxTowersPerBelt) {}
+	
+////////////////////////////////////////////////////////////////////////
+
+ArrogantDetector::TowerIndices::operator TowerID() const
 {
-	return towerID_t(std::round(polarMax_cal / settings.squareWidth));
+	return TowerID(beltIndex*maxTowersPerBelt + phiIndex);
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-ArrogantDetector::towerID_t ArrogantDetector::GetPolarIndex(double const absPolarAngle) const
+ArrogantDetector::towerID_t ArrogantDetector::GetBeltIndex_AbsTanTheta(double const absTanTheta) const
 {
 	// These are asserts because these angles are determined by ArrogantDetector (and derived classes)
 	// If they are wonky, we need to rewrite the detector code
-	assert(absPolarAngle <= polarMax_geometric);
-	assert(absPolarAngle >= 0.);
+	assert(absTanTheta <= tanThetaMax_cal);
+	assert(absTanTheta >= 0.);
 	
-	return towerID_t(std::floor(absPolarAngle/settings.squareWidth));
+	// upper_bound finds the first edge greater than, so we subtract one to get the lower edge
+	towerID_t const beltIndex = (std::upper_bound(beltEdges_tanTheta.begin(), 
+		beltEdges_tanTheta.end(), absTanTheta) - beltEdges_tanTheta.begin()) - 1;
+		
+	assert(beltIndex < numBelts);
+	return beltIndex;
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-ArrogantDetector::towerID_t ArrogantDetector::GetPhiIndex(double phi,
-	towerID_t const polarIndex) const
+ArrogantDetector::towerID_t ArrogantDetector::GetPhiIndex(double phi, towerID_t const beltIndex) const
 {
-	if(std::fabs(phi) > M_PI)
-	{
-		printf("%.16e\n", phi);
-		assert(std::fabs(phi) <= M_PI);
-	}
+	assert(beltIndex < numBelts);
+	auto const& phiSpecs = DeltaPhi(beltIndex);
 	
-	// Because phi_min = -Pi, Pi can be an out of bounds index
-	if(phi == M_PI) 
-		phi = -M_PI;
+	towerID_t phiIndex = towerID_t(std::floor((phi + M_PI)/phiSpecs.DeltaPhi()));
 	
-	towerID_t const phiIndex = towerID_t(std::floor((phi + M_PI)/PhiWidth(polarIndex)));
-	
-	// When phi ~ Pi, we can get some rounding error. 
-	// If we return a PhiIndex which is too large, it could create an invalid towerID.
-	if(phiIndex == NumPhiBins(polarIndex))
-	{
-		//~ printf("%.3e\n", 1. - phi/M_PI);
-		assert(1. - phi/M_PI < 4e-16);
-		return phiIndex - 1;
-	}
-	else assert(phiIndex < NumPhiBins(polarIndex));
-	
+	// When phi ~ Pi, we can get some rounding error. If we return a too-big piIndex,
+	// it could create a towerID which is technically invalid.
+	assert(phiIndex <= phiSpecs.NumTowers());
+	if(phiIndex == phiSpecs.NumTowers())
+		phiIndex = 0;
+		
 	return phiIndex;
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-std::pair<ArrogantDetector::towerID_t, ArrogantDetector::towerID_t>
-ArrogantDetector::GetIndices_PolarPhi(double const absPolarAngle, double const phi) const
+ArrogantDetector::TowerIndices ArrogantDetector::GetIndices_AbsTanTheta_Phi(double const absTanTheta, 
+	double const phi) const
 {
-	towerID_t const polarIndex = GetPolarIndex(absPolarAngle);
-	towerID_t const phiIndex = GetPhiIndex(phi, polarIndex);
+	towerID_t const beltIndex = GetBeltIndex_AbsTanTheta(absTanTheta);
+	towerID_t const phiIndex = GetPhiIndex(phi, beltIndex);
 	
-	return std::pair<towerID_t, towerID_t>(polarIndex, phiIndex);
+	return TowerIndices(beltIndex, phiIndex);
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-std::pair<ArrogantDetector::towerID_t, ArrogantDetector::towerID_t>
-ArrogantDetector::GetIndices_PolarPhi(towerID_t const towerID) const
+double ArrogantDetector::GetCentralPhi(TowerIndices const& indices) const
 {
-	assert(towerID < tooBigID); // b/c towerID_t is unsigned, this also ensures ID >= 0 (catching underflow)
+	auto const& phiSpecs = DeltaPhi(indices.beltIndex);
+	assert(indices.phiIndex < phiSpecs.NumTowers());
 	
-	towerID_t const polarIndex = towerID / settings.numPhiBins_centralBand;
-	towerID_t const phiIndex = towerID - polarIndex * settings.numPhiBins_centralBand;
-	assert(phiIndex < settings.numPhiBins_centralBand);
-	
-	return std::pair<towerID_t, towerID_t>(polarIndex, phiIndex);
+	return -M_PI + (double(indices.phiIndex) + 0.5) * DeltaPhi(indices.beltIndex);
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-ArrogantDetector::towerID_t ArrogantDetector::GetTowerID(double const absPolarAngle, double const phi) const
+Tower ArrogantDetector::GetTowerCenter(TowerIndices const& indices) const
 {
-	auto const indices = GetIndices_PolarPhi(absPolarAngle, phi);
-	return (indices.first * settings.numPhiBins_centralBand) + indices.second;
+	assert(indices.beltIndex < numBelts);		
+	Tower center(towerPrototype[indices.beltIndex], fractionalArea[indices.beltIndex]);
+		
+	double const phi = GetCentralPhi(indices); // This will check for valid phiIndex
+	center.p3.x1 *= std::cos(phi);
+	center.p3.x2 *= std::sin(phi);
+	
+	return center;
 }
 
-////////////////////////////////////////////////////////////////////////
-
-std::array<double, 4> ArrogantDetector::GetTowerEdges(towerID_t const towerID) const
+ArrogantDetector::Edges ArrogantDetector::GetTowerEdges(TowerIndices const& indices) const
 {
-	auto const indices = GetIndices_PolarPhi(towerID);
+	assert(indices.beltIndex < numBelts);
+	auto const& phiSpecs = DeltaPhi(indices.beltIndex);
+	assert(indices.phiIndex < phiSpecs.NumTowers());
 	
-	double const absTheta_left = ToAbsTheta(double(indices.first) * settings.squareWidth);
-	double const absTheta_right = ToAbsTheta(double(indices.first + 1) * settings.squareWidth);
-	assert(absTheta_left >= 0.);
-	assert(absTheta_right > absTheta_left);
-	assert(absTheta_right < M_PI); // ensuring beam hole
+	double const phi_lower = -M_PI + phiSpecs.DeltaPhi() * double(indices.phiIndex);
+	double const phi_upper = std::min(M_PI, phi_lower + phiSpecs.DeltaPhi()); // correct small rounding error, if present
 	
-	double const deltaPhi = PhiWidth(indices.first);
-	double const phi_left = -M_PI + deltaPhi * double(indices.second);
-	assert(phi_left >= -M_PI);
-	assert(phi_left < M_PI);
-	
-	return {absTheta_left, absTheta_right, phi_left, phi_left + deltaPhi};
-}
-
-////////////////////////////////////////////////////////////////////////
-
-ArrogantDetector::vec3_t ArrogantDetector::GetTowerCenter(towerID_t const towerID) const
-{
-	auto const edges = GetTowerEdges(towerID);
-		
-	double const absTheta = 	0.5*(edges[0] + edges[1]);
-	double const phi = 			0.5*(edges[2] + edges[3]);
-		
-	double const cosTheta = std::cos(absTheta);
-	return vec3_t(std::cos(phi) * cosTheta, std::sin(phi) * cosTheta, std::sin(absTheta));
-}
-
-////////////////////////////////////////////////////////////////////////
-
-std::vector<ArrogantDetector::vec3_t> ArrogantDetector::GetTowerArea() const
-{
-	std::vector<vec3_t> towerVec;
-	
-	/* REMEMBER: we are using a different polar angle: th = 0 --> equator, so cos(theta) is the 
-	 * dOmega = \int cos(theta) dTheta dPhi = deltaPhi * (sin(t2) - sin(t1))
-	 * 	= 2*sin((th2 - th1)/2)*cos((th1 + th2)/2)*dPhi
-	 * 2 dPhi / (4 pi) = dPhi / (2 pi) = (2 pi)/numPhiBins / (2 pi) = 1./numPhiBins    so ....
-	 * dOmega / (4 pi) = sin((th2 - th1)/2)*cos((th1 + th2)/2) / numPhiBins
-	*/	
-	towerID_t const polarIndex_end = NumTowerBands();
-		
-	for(towerID_t polarIndex = 0; polarIndex < polarIndex_end; ++polarIndex)
-	{
-		towerID_t const numPhiBins = towerID_t(std::round((2.*M_PI) / PhiWidth(polarIndex)));
-				
-		// NO shortcuts; theta and polarAngle do not neccesarily map linearly
-		double const theta1 = ToAbsTheta(double(polarIndex) * settings.squareWidth);
-		double const theta2 = ToAbsTheta(double(polarIndex + 1) * settings.squareWidth);
-		
-		// We assume that deltaPhi is the same over an entire band, true up to O(epsilon)
-		double const dOmegaNorm = 
-			std::sin(0.5*(theta2 - theta1))*std::cos(0.5*(theta1 + theta2)) / double(numPhiBins);
-		
-		// This is an inefficient way to get the tower center; however, it is the most readable.
-		// And we don't expect this function to get called very often
-		for(towerID_t phiIndex = 0; phiIndex < numPhiBins; ++phiIndex)
-		{
-			towerID_t const towerIndex = polarIndex * settings.numPhiBins_centralBand + phiIndex;
-			towerVec.push_back(GetTowerCenter(towerIndex) * dOmegaNorm);
-			towerVec.push_back(towerVec.back());
-			towerVec.back().x3 = -towerVec.back().x3; // emplace the backward detector
-		}
-	}
-	
-	return towerVec;
-}
-
-////////////////////////////////////////////////////////////////////////
-
-// Fill the detector from the Pythia event
-void ArrogantDetector::operator()(Pythia8::Pythia& theEvent, 
-	std::vector<vec4_t> const& pileupVec)
-{
-	std::vector<vec4_t> neutralVec, chargedVec;
-	std::vector<vec4_t> invisibleVec;
-	
-	me.clear();
-	clearME = false; // Communicate to second call to operator() not to clear ME
-		
-	// Use a *signed* int as an index iterator because Pythia does (why?!!)
-	for(int i = 0; i < theEvent.event.size(); ++i)
-	{
-		if(std::abs(theEvent.event[i].status()) == 23) // ME final state
-			me.emplace_back(theEvent.event[i]);
-		
-		// not else if because ME may have photon, lepton
-		if(theEvent.event[i].isFinal())
-		{
-			Pythia8::Particle& particle = theEvent.event[i];
-			
-			kdp::Vec3 const p3(particle.px(), particle.py(), particle.pz());
-				
-			if(not particle.isVisible()) // i.e. invisible neutrinos
-				invisibleVec.emplace_back(p3);
-			else
-				(particle.isCharged() ? chargedVec : neutralVec).
-					emplace_back(particle.e(), p3, kdp::Vec4from2::Energy);
-		}
-	}
-	
-	(*this)(neutralVec, chargedVec, invisibleVec, pileupVec); // Do the actual detection
+	return Edges{beltEdges_eta[indices.beltIndex], beltEdges_eta[indices.beltIndex + 1], 
+		phi_lower, phi_upper};
 }
 
 ////////////////////////////////////////////////////////////////////////
 
 void ArrogantDetector::Clear()
 {
-	finalState.clear(); 
-	tracks.clear();	
+	finalState.clear();
+	tracks.clear();
 	towers.clear();
+	tracks_PU.clear();
 	
-	if(clearME) 
-		me.clear(); // Clear the matrix element, if requested
-	clearME = true; // Clear next time. Only don't clear when called by operator(Pythia, ...)
+	me.clear();
+	
+	foreCal.clear();
+	backCal.clear(); 
+		
+	visibleE = pileupE = 0.;
+	visibleP3 = vec3_t(0., 0., 0.);
+	invisibleP4 = vec4_t(0., 0., 0., 0.);
+	
+	finalized = false;
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-void ArrogantDetector::operator()(std::vector<vec4_t> const& neutralVec,
-	std::vector<vec4_t> const& chargedVec, std::vector<vec4_t> const& invisibleVec,
-	std::vector<vec4_t> const& pileupVec)
+void ArrogantDetector::Finalize(bool const correctMisingE)
 {
-	Clear();
+	if(finalized)
+		throw std::runtime_error("ArrogantDetector: Detector already finalized; undefined behavior.");
 	
-	// These are only used in this function, so we clear here for clarity
-	foreCal.clear(); backCal.clear(); 
-		
-	finalStateE = visibleE = 0.;
-	visibleP3 = vec3_t(0., 0., 0.);
-	invisibleP3 = vec3_t(0., 0., 0.);
+	WriteCal(foreCal, false);
+		foreCal.clear();
+	WriteCal(backCal, true); // flipZ = true
+		backCal.clear();
 	
+	if(correctMisingE)
+		AddMissingE();
+	
+	finalized = true;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void ArrogantDetector::PartialFill(std::vector<vec4_t> const& neutralVec,
+	std::vector<vec4_t> const& chargedVec, std::vector<vec4_t> const& invisibleVec, 
+	std::vector<vec4_t> const& neutralPileup, std::vector<vec4_t> const& chargedPileup)
+{
 	/* Invisible doesn't show up in the detector,
 	 * Pileup and track-subtracted excess doesn't show up in finalState.
-	 * Thus we can create a single vector (allVec) which mereges all input,
+	 * Thus we can create a single vector (allVec) which merges all input,
 	 * keeping the control logic simpler (i.e. no separate, redundant loops).
 	 * Furthermore, the track subtraction scheme requires appending to neutralVec, 
 	 * which requires creating a copy anyway.
 	 *  
-	 *           <neutP3 >
+	 *           <invblp3>
 	 *           <--- finalState ---------->
-	 * allVec = {invisible, charged, neutral, pileup, [track-subtracted excess]}
-	 *                      <--- detected ------------------------------------>
-	 *                      <trakd>
+	 * allVec = {invisible, neutral, charged, pileup^+, pileup^0, [track-subtracted excess]}
+	 *                      <--- detected ------------------------------------------------>
+	 *                               <--- tracked --->
 	 * 
 	 * The track subtraction scheme will cause each tracked charged particle to 
 	 * add a neutral after pileup. Since we will be using iterators to loop over allVec, 
 	 * we must ensure that cnV has the capacity for all potential additions,
 	 * so that all iterators remain valid. 
-	*/	
-		
+	*/
+	
+	// TODO: using iterators here is really unnecessary. The time is not spent 
+	// looking up values. It would be much safer and more readable to use indices.
+	
+	// MUST reserve space for all track excess, because we are growing list in place
+	// and using iterators to refer to positions. 
 	std::vector<vec4_t> allVec;
-	allVec.reserve(invisibleVec.size() + 2*chargedVec.size()
-		+ neutralVec.size() + pileupVec.size());
+	allVec.reserve(invisibleVec.size() + 2*(chargedVec.size() + chargedPileup.size())
+		+ neutralVec.size() + neutralPileup.size());
+		
+	size_t const capacity = allVec.capacity();
 	
 	allVec.insert(allVec.end(), invisibleVec.begin(), invisibleVec.end());
+	auto const invisible_end = allVec.end();
 	
-	auto const itChargedBegin = allVec.end();
-	allVec.insert(allVec.end(), chargedVec.begin(), chargedVec.end()); 
-	
-	auto const itNeutralBegin = allVec.end();
 	allVec.insert(allVec.end(), neutralVec.begin(), neutralVec.end());
+	auto const charged_beg = allVec.end();
 	
-	auto const itPileupBegin = allVec.end();
-	allVec.insert(allVec.end(), pileupVec.begin(), pileupVec.end());
+	allVec.insert(allVec.end(), chargedVec.begin(), chargedVec.end());
+	auto const finalState_end = allVec.end();
 	
+	allVec.insert(allVec.end(), chargedPileup.begin(), chargedPileup.end());
+	auto const charged_end = allVec.end();
+	
+	allVec.insert(allVec.end(), neutralPileup.begin(), neutralPileup.end());
+
+	// Ensure that all iterators are still valid.
+	assert(capacity == allVec.capacity());
+		
 	// CARFEUL, we are appending to the vector we are iterating over
 	for(auto itAll = allVec.begin(); itAll not_eq allVec.end(); ++itAll)
 	{
@@ -420,56 +432,53 @@ void ArrogantDetector::operator()(std::vector<vec4_t> const& neutralVec,
 			throw std::runtime_error("ArrogantDetector: Spacelike-particle: [" + 
 				std::to_string(energy) + ", " + std::to_string(pMag) + "]");
 		if(pMag > 0.) // Only particles that move are detected
+		// This check ensures that we can search for TowerID for neutral particles
 		{
-			if(itAll < itPileupBegin)
-			{			
-				// Here we make the mistake of assuming that everything is massless, 
-				// so the finalState momentum probably won't balance 100%
-				finalStateE += energy;
-				//~ finalState.emplace_back(p3, energy, true); // true => p3 will be normalized when it is emplaced
-				finalState.push_back(p3);
-			}
-			
-			if(itAll < itChargedBegin) // fundamentally invisible energy
-				invisibleP3 += p3;
+			// finalState is the vector of everything that came from the hard scatter
+			// (including neutrinos). We are not interested in pileup.
+			if(itAll < finalState_end)
+				finalState.push_back(*itAll);
+									
+			if(itAll < invisible_end) // fundamentally invisible energy
+				invisibleP4 += *itAll;
 			else // Everything else can potentially be seen in the detector
 			{
-				double const absPolarAngle = AbsPolarAngle(p3);
-				assert(absPolarAngle >= 0.);
+				double const absTanTheta = std::fabs(p3.x3)/p3.T().Mag();
 				
-				if(absPolarAngle < polarMax_cal) // It's within the cal, the detector can see it
+				if(absTanTheta < tanThetaMax_cal) // It's within the cal, the detector can see it
 				{
 					// We see a track when ... 
-					if((itAll < itNeutralBegin) // it's charged
-						and (absPolarAngle < polarMax_track) // within the tracker
+					if(((itAll >= charged_beg) and (itAll < charged_end)) // it's charged
+						and (absTanTheta < tanThetaMax_track) // within the tracker
 						and (p3.T().Mag() > settings.minTrackPT)) // and has enough pT
 					{
 						// The detector will see the momentum of the charged particle and 
 						// assume that it is massless, subtracting only it's momentum from 
 						// the calorimeter cell. So we add the energy excess as a neutral particle.
-						// We don't need to scale p3 in the new neutral because 
-						// p3 is only used to determine direction.
-						double const& trackE = pMag; // trackE part written before pMag; hopefully compiler will ellude
+						double const& trackE = pMag; // hopefully compiler will ellude
 						
 						visibleE += trackE;
 						visibleP3 += p3;
 						
-						tracks.push_back(p3);
-						
-						// Only bin excess energy when there is some; 
+						// Bin excess energy when there is some; 
 						// otherwise we create a null 3-vector, which screws up the calorimeter lookup
 						if(trackE < energy)
-						{	
+						{
 							// We're about to grow allVec; if it reallocates, all iterators become invalid
 							assert(allVec.size() < allVec.capacity());
 							
-							//~ tracks.emplace_back(finalState.back().pHat, trackE, false); // Reuse pre-normalized vector
-							//~ allVec.emplace_back(energy - trackE, p3, kdp::Vec4from2::Energy);
-							
 							allVec.emplace_back(0., p3*((energy - trackE)/trackE), kdp::Vec4from2::Mass);
 							
-							// THIS IS NOT SAFE; it will round to zero when trackE != energy
+							// THIS IS NOT SAFE; it will round to zero when trackE ~= energy
 							//~ allVec.emplace_back(0., p3*(energy/trackE - 1.), kdp::Vec4from2::Mass);
+						}
+						
+						if(itAll < finalState_end)
+							tracks.push_back(p3);
+						else
+						{
+							pileupE += trackE;
+							tracks_PU.push_back(p3);
 						}
 					}
 					else // we don't see a track, so it's seen by the calorimeter
@@ -477,197 +486,412 @@ void ArrogantDetector::operator()(std::vector<vec4_t> const& neutralVec,
 						visibleE += energy;
 						
 						(IsForward(p3) ? foreCal : backCal)
-							[GetTowerID(absPolarAngle, p3.T().Phi())] += energy;
+							[GetIndices_AbsTanTheta_Phi(absTanTheta, p3.T().Phi())] += energy;
 					}
 				}
-				// else it's not seen
-			}
-		}
-	}
-		
-	WriteCal(foreCal, false);
-	WriteCal(backCal, true);
-	
-	AddMissingE();
-	
-	// Now that totalEnergy is known, normalize the energy fractions of tracks and finalState
-	//~ for(PhatF& particle : finalState)
-		//~ particle.f /= finalStateE;
-		
-	//~ for(PhatF& track : tracks)
-		//~ track.f /= visibleE;
-			
-	//~ for(PhatF& tower : towers)
-		//~ tower.f /= visibleE;
+				// END: inside the cal
+			}// END: visible 
+		}// END: moving
+	}// END: allVec loop
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-void ArrogantDetector::WriteCal(cal_t const& cal, bool const backward)
+void ArrogantDetector::PartialFill(Pythia8::Pythia& theEvent, bool const isPileup)
+{
+	std::vector<vec4_t> neutralVec, chargedVec, invisibleVec;
+	
+	if(not isPileup)
+		me.clear();
+		
+	// Use a *signed* int as an index iterator because Pythia does (why?!!)
+	for(int i = 0; i < theEvent.event.size(); ++i)
+	{
+		if((not isPileup) and (std::abs(theEvent.event[i].status()) == 23)) // ME final state
+			me.emplace_back(theEvent.event[i]);
+		
+		// remember ... ME may have observable particle (photon, lepton, ...), 
+		// so check for final state even if it has status 23
+		if(theEvent.event[i].isFinal())
+		{
+			Pythia8::Particle& particle = theEvent.event[i];
+			
+			kdp::Vec3 const p3(particle.px(), particle.py(), particle.pz());
+				
+			if(not particle.isVisible()) // i.e. invisible neutrinos
+				invisibleVec.emplace_back(p3);
+			else
+			{
+				(particle.isCharged() ? chargedVec : neutralVec).
+					emplace_back(particle.e(), p3, kdp::Vec4from2::Energy);
+			}
+		}
+	}
+	
+	if(isPileup)
+		PartialFill(std::vector<vec4_t>(), std::vector<vec4_t>(), 
+			invisibleVec, neutralVec, chargedVec);
+	else
+		PartialFill(neutralVec, chargedVec, invisibleVec);
+}
+			
+////////////////////////////////////////////////////////////////////////
+
+void ArrogantDetector::operator()(std::vector<vec4_t> const& neutralVec,
+	std::vector<vec4_t> const& chargedVec, std::vector<vec4_t> const& invisibleVec,
+	std::vector<vec4_t> const& neutralPileup, std::vector<vec4_t> const& chargedPileup)
+{
+	Clear();	
+		PartialFill(neutralVec, chargedVec, invisibleVec, neutralPileup, chargedPileup);	
+	Finalize();
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void ArrogantDetector::operator()(Pythia8::Pythia& theEvent)
+{
+	Clear();
+		PartialFill(theEvent, false); // isPileup = false
+	Finalize();
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void ArrogantDetector::WriteCal(cal_t const& cal, bool const flipZ)
 {
 	// Convert all towers to massless 3-vectors
 	for(auto itTower = cal.begin(); itTower not_eq cal.end(); ++itTower)
 	{
-		double const energy = itTower->second;
-		// Emplace pre-normalized p3 (false means don't normalize)
-		//~ towers.emplace_back(GetTowerCenter(itTower->first), energy, false);
-		towers.push_back(GetTowerCenter(itTower->first)*energy);
+		towers.push_back(GetTowerCenter(itTower->first)); // first == towerID
+		vec3_t& p3 = towers.back().p3;
+		
+		p3 *= itTower->second; // second == tower energy
 		
 		// Flip the z-coord for the backward detector
-		if(backward)
-			towers.back().x3 = -towers.back().x3;
+		if(flipZ)
+			p3.x3 = -p3.x3;
 		
 		// Add the 3-momentum of the (massless) tower to the running sum
-		//~ visibleP3 += (towers.back().pHat * energy);
-		visibleP3 += towers.back();
+		visibleP3 += p3;
 	}
 }
 
-////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////F
 
+// TODO: This is probably not the correct approach to missing energy
 void ArrogantDetector::AddMissingE()
 {
-	double const missingE = visibleP3.Mag();
-	visibleE += missingE;
+	auto const missingP3 = -visibleP3;
+	auto const discardedP3 = std::accumulate(tracks_PU.begin(), tracks_PU.end(), vec3_t());
+	
+	auto const correctionP3 = missingP3 + discardedP3;
+	double const correctionE = correctionP3.Mag(); 
 	
 	// MET is treated as a tower, due to poor angular resolution.
-	//~ towers.emplace_back(-visibleP3, missingE);
-	towers.push_back(-visibleP3);
+	// We also add a tower accounting for the pileup tracks which we discard
+	visibleE += (correctionE - pileupE);
+	
+	double const towerE = std::accumulate(towers.begin(), towers.end(), 0., 
+		[](double const sum, Tower const& tower){return sum + tower.p3.Mag();});
+	
+	// Add the correctoinP3 to towers, since they have poor angular resolution, 
+	// and do it proportional to each tower's fraction of the tower energy.
+	for(Tower& tower : towers)
+		tower.p3 += correctionP3 * (tower.p3.Mag() / towerE);	
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-//! @brief Return all visible energy in calorimeter towers, 
-//  defined by the tower's edges <(theta_L, theta_R, phi_L, phi_R), energy>
-std::vector<std::pair<std::array<double, 4>, double>> ArrogantDetector::AllVisibleAsTowers()
+std::vector<ArrogantDetector::RawTower> ArrogantDetector::GetAllTowers() const
 {
-	// This should not have side effects
-	foreCal.clear(); backCal.clear();
+	std::vector<RawTower> allTowers;
 	
-	std::vector<std::pair<std::array<double, 4>, double>> visible;
-	
-	std::vector<vec3_t> particles = tracks;
-	particles.insert(particles.end(), towers.begin(), towers.end() - 1); // Don't copy the missing energy
-	
-	for(auto const& p3 : particles)
+	TowerIndices indices(0);
+	towerID_t& beltIndex = indices.beltIndex;
+	towerID_t& phiIndex = indices.phiIndex;	
+		
+	for(beltIndex = 0; beltIndex < numBelts; ++beltIndex)
 	{
-		(IsForward(p3) ? foreCal : backCal)
-			[GetTowerID(AbsPolarAngle(p3), p3.T().Phi())] += p3.Mag();
+		towerID_t const numTowers = DeltaPhi(beltIndex).NumTowers();
+		double const fA = fractionalArea[beltIndex];
+		
+		for(phiIndex = 0; phiIndex < numTowers; ++phiIndex)
+		{
+			allTowers.emplace_back(GetTowerEdges(indices), fA);
+			allTowers.emplace_back(allTowers.back());
+			allTowers.back().FlipZ();
+		}
 	}
 	
-	// We don't use this dOmega because it complicates the depiction on a plane
-	// 2*sin((th2 - th1)/2)*cos((th1 + th2)/2)*dPhi
+	return allTowers;
+}
+
+std::vector<ArrogantDetector::RawTower> ArrogantDetector::AllVisible_InTowers()
+{
+	foreCal.clear(); backCal.clear();
+	
+	std::vector<RawTower> visible;
+	
+	{
+		std::vector<vec3_t> particles = tracks;
+		particles.insert(particles.end(), towers.begin(), towers.end()); // Is MissingE in here?
+			
+		for(auto const& p3 : particles)
+		{
+			double const absTanTheta = p3.T().Mag()/std::fabs(p3.x3);
+			
+			(IsForward(p3) ? foreCal : backCal)
+				[GetIndices_AbsTanTheta_Phi(absTanTheta, p3.T().Phi())] += p3.Mag();
+		}
+	}
 	
 	for(auto itTower = foreCal.begin(); itTower not_eq foreCal.end(); ++itTower)
 	{
-		auto const edges = GetTowerEdges(itTower->first);
-		double const dOmega = 1.;
-		//~ 2.*std::sin(0.5*(edges[1]-edges[0]))*
-			//~ std::cos(0.5*(edges[1]+edges[0])) * (edges[3]-edges[2]);
+		TowerID const& towerID = itTower->first;
+		double const& energy = itTower->second;
+	
+		double const fractionalSolidAngle = 1.;
+			//~ fractionalArea(GetIndices_EtaPhi(towerID).first);
 		
-		visible.emplace_back(edges, itTower->second / dOmega);
+		visible.push_back(RawTower{GetTowerEdges(towerID), energy / fractionalSolidAngle});
 	}
 	
 	for(auto itTower = backCal.begin(); itTower not_eq backCal.end(); ++itTower)
 	{
-		auto const edges = GetTowerEdges(itTower->first);
-		double const dOmega = 1.;
-		//~ 2.*std::sin(0.5*(edges[1]-edges[0]))*
-			//~ std::cos(0.5*(edges[1]+edges[0])) * (edges[3]-edges[2]);
-		
-		visible.emplace_back(edges, itTower->second / dOmega);
-		
-		// Backward cal, reverse the theta (and swap positions, since smaller was larger)
-		double const theta_L = -visible.back().first[1];
-		visible.back().first[1] = -visible.back().first[0];
-		visible.back().first[0] = theta_L;
+		TowerID const& towerID = itTower->first;
+		double const& energy = itTower->second;
+	
+		double const fractionalSolidAngle = 1.;
+			//~ fractionalArea(GetIndices_EtaPhi(towerID).first);
+			
+		visible.push_back(RawTower{GetTowerEdges(towerID), energy / fractionalSolidAngle});
+		visible.back().FlipZ();
 	}
+	
+	foreCal.clear();
+	backCal.clear();
 
 	return visible;
 }
 
 ////////////////////////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////
 
-ArrogantDetector_Lepton::~ArrogantDetector_Lepton() {}
-
-double ArrogantDetector_Lepton::AbsPolarAngle(vec3_t const& particle) const
+ArrogantDetector_Hadron::ArrogantDetector_Hadron(QSettings const& parsedINI, 
+	std::string const& detectorName):
+ArrogantDetector(parsedINI, detectorName),
+deltaPhi(settings.squareWidth, settings.evenTowers)
 {
-	return std::atan2(std::fabs(particle.x3), particle.T().Mag());
-}
+	// We want our towers as square as possible,
+	// so we require that the span in theta (deltaTheta) equals the 
+	// span in phi (cos(theta_0)*deltaPhi), where theta_0 is 
+	// the central theta for each band:
+	// 	deltaTheta = deltaPhi * std::cos(theta_0)
+	// deltaPhi is fixed for every band.
+	// We can solve this transcendental equation recursively, 
+	// using the fixed-point iterative method (x = g(x)). 
+	// This recursion will converge provided that g'(x0) < 1 in the 
+	// vicinity of the fixed point x0.
+	// While we do not explicitly check that this condition is satisfied, 
+	// empirical testing reveals no problems with reasonable values of squareWidth.
+	// We do not need an exact solution, so we define a convergence threshold.
+	static constexpr double threshold = 1e-5;
 
-////////////////////////////////////////////////////////////////////////
-
-double ArrogantDetector_Lepton::PhiWidth
-(towerID_t const thetaIndex) const
-{
-	return phiWidth[thetaIndex];
-}
-
-////////////////////////////////////////////////////////////////////////
-
-ArrogantDetector_Lepton::towerID_t ArrogantDetector_Lepton::NumPhiBins
-(towerID_t const thetaIndex) const
-{
-	return numPhiBins[thetaIndex];
-}
-
-////////////////////////////////////////////////////////////////////////
-
-void ArrogantDetector_Lepton::Init_phiWidth()
-{
-	phiWidth.clear();
-	numPhiBins.clear();
+	// Start at the equator
+	double eta_lower = 0.;
+	double theta_lower = 0.;
 	
-	// The number of phi towers depends on the central theta, 
-	// due to the differential solid angle dOmega = cos(theta) dTheta dPhi
-	// NOTE: this differential solid angle is different than standard polar angle, 
-	// since theta = 0 corresponds to totally transverse
+	// Being near the equator, theta-phi space is rather Euclidean, 
+	// so an educated guess for deltaTheta is that it's equal to deltaPhi.
+	double deltaTheta = settings.squareWidth;
 	
-	// However, the real solid angle is \int cos(th) = dPhi * (sin(th2) - sin(th1))
-	// dOmega = 2*sin((th2 -th1)/2)*cos((th1 + th2)/2)*dPhi
-	// So for the central band, 
-	// 	dOmega0 = 2*sin(sw/2)*cos(sw/2)*sw   (sw = squareWidth)
-	// And for all other bands,
-	// 	dOmega = 2*sin(sw/2)*cos((2th1 + sw)/2)*dPhi
-	// Setting the two equal and solving for dPhi
-	// 	dPhi = sw*cos(sw/2) / cos((2th1 + sw)/2)
-	phiWidth.push_back(settings.squareWidth);
-	numPhiBins.push_back(settings.numPhiBins_centralBand);
-	
-	double const dPhiNumerator = 
-		settings.squareWidth * std::cos(0.5*settings.squareWidth);
-		
-	for(double theta1 = settings.squareWidth; 
-		theta1 < polarMax_cal; theta1 += settings.squareWidth)
+	// Keep defining calorimeter bands till we reach the end of coverage
+	while(eta_lower <= settings.etaMax_cal)
 	{
-		double dPhi = dPhiNumerator / std::cos(0.5*(2.*theta1 + settings.squareWidth));
-		double const numPhiTowers = 2.*std::round(M_PI / dPhi);
-		assert((size_t(numPhiTowers) bitand 1lu) == 0lu); // Check for even number of towers
+		// Each iteration starts with a valid lower edge; store it.
+		beltEdges_eta.push_back(eta_lower);
+		
+																		GCC_IGNORE_PUSH(-Wfloat-equal)
+		if(beltEdges_eta.back() == settings.etaMax_cal)
+			break;
+																		GCC_IGNORE_POP
+		
+		{
+			double deltaTheta_last;
+			size_t iterations = 0; // Safety valve for divergence.
+			do
+			{
+				// DeltaPhi is constant; calling DeltaPhi(0) is the easiest way to get it
+				deltaTheta_last = deltaTheta;
+				deltaTheta = DeltaPhi(0) * std::cos(theta_lower + deltaTheta);
 				
-		phiWidth.push_back((2. * M_PI) / numPhiTowers);
-		numPhiBins.push_back(towerID_t(numPhiTowers));
+				assert(++iterations < 100);
+				assert(deltaTheta > 0.);
+			}
+			// Use the scale-free relative difference to gauge convergence, 
+			// in case the two deltaTheta are on vastly different scales
+			while(std::fabs(deltaTheta - deltaTheta_last) > threshold * (deltaTheta + deltaTheta_last));
+		}
+		theta_lower += deltaTheta;
+		eta_lower = Theta_to_Eta(theta_lower);
 	}
+	
+	// We have told ArrogantDetector where the equatorial bands are; 
+	// it will handle the rest.
+	Init_inDerivedCTOR();
 }
 
 ////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
 
-double ArrogantDetector_Hadron::AbsPolarAngle(vec3_t const& particle) const
+ArrogantDetector_EqualArea::ArrogantDetector_EqualArea(QSettings const& parsedINI, 
+	std::string const& detectorName):
+ArrogantDetector(parsedINI, detectorName)
 {
-	return std::fabs(particle.Eta());
+	// We will use the same fixed point iterative scheme as ArrogantDetector_Hadron; 
+	// (refer to those comments for a primer on the method).
+	// This time, however, we want our towers to have approximately constant solid angle
+	// 	Omega = \int cos(th) = dPhi * (sin(th2) - sin(th1))
+	//          = 2*sin((th2 -th1)/2)*cos((th1 + th2)/2)*dPhi
+	// So for the central band (th1 = 0, th2 = dTheta_0)
+	//    Omega0 = 2*sin(dTheta_0/2)*cos(dTheta_0/2)*dPhi_0
+	// And for all other bands (since all towers share same values)
+	//    Omega = 2*sin(dTheta/2)*cos(theta_central)*dPhi	
+	static constexpr double threshold = 1e-5;
+	
+	// We will perform the optimization in two steps;
+	//   1. optimize the central band to have square towers
+	//   2. optimize the remaining bands to have Omega = Omega0
+	
+	// Step 1. Map out the first band; start by emplacing its known lower edge and deltaPhi
+	beltEdges_eta.push_back(0.);
+	
+	// deltaPhi has already been determined for the first belt
+	EmplaceDeltaPhi(settings.squareWidth);
+	
+	// We will use the same educated guess for deltaTheta throughout
+	double const deltaTheta0 = DeltaPhi(0);
+	double deltaTheta = deltaTheta0;
+	
+	// deltaPhi is fixed; adjust deltaTheta to make the central towers as square as possible
+	{
+		double deltaTheta_last;
+		size_t iterations = 0;
+				
+		// The same recursion as ArrogantDetector_Hadron
+		do
+		{
+			deltaTheta_last = deltaTheta;
+			deltaTheta = DeltaPhi(0) * std::cos(0.5 * deltaTheta);
+			
+			assert(++iterations < 100);
+			assert(deltaTheta > 0.);			
+		}
+		while(std::fabs(deltaTheta - deltaTheta_last) > threshold * (deltaTheta + deltaTheta_last));
+	}	
+	
+	// Program in the optimized deltaTheta
+	double theta_lower = deltaTheta;
+	double eta_lower = Theta_to_Eta(theta_lower);
+	
+	// Calculate the solid angle (dropping the factor of 2 here and everywhere else)
+	double const Omega0 = std::sin(0.5*deltaTheta)*std::cos(0.5*deltaTheta)*DeltaPhi(0);
+		
+	while(eta_lower <= settings.etaMax_cal)
+	{
+		beltEdges_eta.push_back(eta_lower); // Emplace valid lower edge
+		
+																		GCC_IGNORE_PUSH(-Wfloat-equal)
+		if(beltEdges_eta.back() == settings.etaMax_cal)
+			break;
+																		GCC_IGNORE_POP
+		
+		// Testing reveals that the actual deltaTheta always very close to deltaTheta0
+		deltaTheta = std::min(deltaTheta0, M_PI_2 - theta_lower);
+		
+		// Fix deltaPhi based on the educated guess, 
+		// (circular continuity gives deltaPhi less freedom; 
+		// I fear the situation where we try to co-optimize deltaPhi and deltaTheta, 
+		// and deltaPhi begins an infinite oscillate across a half-integer boundary for 
+		// the number of phi bins).
+		double deltaPhi = Omega0 / (std::sin(0.5*deltaTheta)
+			* std::cos(theta_lower + 0.5*deltaTheta));
+		deltaPhi = EmplaceDeltaPhi(deltaPhi);
+		
+		// We now fix deltaPhi and alter deltaTheta to make towers have equal angle
+		{
+			double deltaTheta_last;
+			size_t iterations = 0;
+			
+			// Now we want our towers to have the same Omega and Omega0
+			do
+			{
+				deltaTheta_last = deltaTheta;
+				deltaTheta = 2.*std::asin(Omega0 / (deltaPhi * std::cos(theta_lower + 0.5*deltaTheta)));
+				
+				assert(++iterations < 1000);
+			}
+			while(std::fabs(deltaTheta - deltaTheta_last) > threshold * (deltaTheta + deltaTheta_last));
+		}
+		
+		// When we hit the pole, deltaTheta may need to get negative to satisfy omega requirements
+		if(deltaTheta > 0.)
+		{
+			theta_lower += deltaTheta;
+			eta_lower = Theta_to_Eta(theta_lower);
+		}
+		else break;
+	}
+	
+	Init_inDerivedCTOR();
 }
-
+		
 ////////////////////////////////////////////////////////////////////////
 
-// We have p> = {pT cos(phi), pT sin(phi), pT sinh(eta)} = pT {cos(theta), sin(theta)}
-// So theta = atan(sinh(eta)) (also known as the Gudermannian)
-double ArrogantDetector_Hadron::ToAbsTheta(double const absEta) const
+ArrogantDetector::PhiSpec const& ArrogantDetector_EqualArea::EmplaceDeltaPhi(double const deltaPhi_target)
 {
-	return std::atan(std::sinh(absEta));
+	belt_deltaPhi.emplace_back(deltaPhi_target, settings.evenTowers);
+	return belt_deltaPhi.back();
+}
+
+////////////////////////////////////////////////////////////////////////		
+
+ArrogantDetector::PhiSpec const& ArrogantDetector_EqualArea::DeltaPhi(towerID_t const beltIndex) const
+{
+	return belt_deltaPhi.at(beltIndex);
 }
 
 ////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
+
+
+//~ double ArrogantDetector_Lepton::AbsEquatorialAngle(vec3_t const& particle) const
+//~ {
+	//~ return std::atan2(std::fabs(particle.x3), particle.T().Mag());
+//~ }
+
+////////////////////////////////////////////////////////////////////////
+
+
+////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////
+
+//~ double ArrogantDetector_Hadron::AbsEquatorialAngle(vec3_t const& particle) const
+//~ {
+	//~ return std::fabs(particle.Eta());
+//~ }
+
+//~ ////////////////////////////////////////////////////////////////////////
+
+//~ // We have p> = {pT cos(phi), pT sin(phi), pT sinh(eta)} = pT {cos(theta), sin(theta)}
+//~ // So theta = atan(sinh(eta)) (also known as the Gudermannian)
+//~ double ArrogantDetector_Hadron::ToAbsTheta(double const absEta) const
+//~ {
+	//~ return std::atan(std::sinh(absEta));
+//~ }
+
+////////////////////////////////////////////////////////////////////////
+
+
 
 /*
 ArrogantDetector_Lepton::towerID_t ArrogantDetector_Lepton::GetTowerID
@@ -922,4 +1146,101 @@ ArrogantDetector_Lepton::vec3_t ArrogantDetector_Lepton::GetTowerCenter(towerID_
 	//~ }
 	//~ // Now that the cal is clear, we can clear the list of struck towers
 	//~ struck.clear();
+//~ }
+
+////////////////////////////////////////////////////////////////////////
+
+//~ double ArrogantDetector::EquatorialFromAbsEta(double const absEta) const
+//~ {
+	//~ // To translate \p absEta to the equatorial angle \a t using only AbsEquatorialAngle(),
+	//~ // we create a dummy 3-vector. This hack is slow but acceptable since 
+	//~ // it is only used during initialization in Init_inDerivedCTOR().
+	
+	//~ return AbsEquatorialAngle(vec3_t(1., std::fabs(absEta), 0., kdp::Vec3from::LengthEtaPhi));
+//~ }
+
+////////////////////////////////////////////////////////////////////////
+
+//~ double ArrogantDetector::EtaFromAbsEquatorial(double const absEquatorial) const
+//~ {
+	//~ // To translate absEquatorial to pseudorapidity, we create a dummy 3-vector
+	//~ // This hack is slow but acceptable since it is only used during initialization	
+	//~ double const absTheta = ToAbsTheta(absEquatorial);
+	
+	//~ return vec3_t(std::cos(absTheta), 0., std::sin(absTheta)).Eta();
+//~ }
+
+////////////////////////////////////////////////////////////////////////
+
+//~ double ArrogantDetector::EtaMaxToEquatorialMax(double const etaMax) const
+//~ {
+	//~ // Convert eta to equatorial angle
+	//~ double equatorialMax = kdp::RoundToNearestPitch(EquatorialFromAbsEta(etaMax), settings.squareWidth);
+	
+	//~ // Make sure there is a beam hole.
+	//~ if(equatorialMax >= equatorialMax_geometric)
+		//~ equatorialMax -= settings.squareWidth;
+	//~ assert(equatorialMax < equatorialMax_geometric);
+		
+	//~ return equatorialMax;
+//~ }
+
+////////////////////////////////////////////////////////////////////////
+
+//~ std::array<double, 4> ArrogantDetector::GetTowerEdges(towerID_t const towerID) const
+//~ {
+	//~ auto const indices = GetIndices_EquatorialPhi(towerID);
+	
+	//~ double const absTheta_left = ToAbsTheta(double(indices.first) * settings.squareWidth);
+	//~ double const absTheta_right = ToAbsTheta(double(indices.first + 1) * settings.squareWidth);
+	//~ assert(absTheta_left >= 0.);
+	//~ assert(absTheta_right > absTheta_left);
+	//~ assert(absTheta_right < M_PI); // ensuring beam hole
+	
+	//~ double const deltaPhi = PhiWidth(indices.first);
+	//~ double const phi_left = -M_PI + deltaPhi * double(indices.second);
+	//~ assert(phi_left >= -M_PI);
+	//~ assert(phi_left < M_PI);
+	
+	//~ return {absTheta_left, absTheta_right, phi_left, phi_left + deltaPhi};
+//~ }
+
+////////////////////////////////////////////////////////////////////////
+
+//~ std::vector<ArrogantDetector::vec3_t> ArrogantDetector::GetTowerArea() const
+//~ {
+	//~ std::vector<vec3_t> towerVec;
+	
+	//~ /* REMEMBER: we are using a different equatorial angle: th = 0 --> equator, so cos(theta) is the 
+	 //~ * dOmega = \int cos(theta) dTheta dPhi = deltaPhi * (sin(t2) - sin(t1))
+	 //~ * 	= 2*sin((th2 - th1)/2)*cos((th1 + th2)/2)*dPhi
+	 //~ * 2 dPhi / (4 pi) = dPhi / (2 pi) = (2 pi)/numPhiBins / (2 pi) = 1./numPhiBins    so ....
+	 //~ * dOmega / (4 pi) = sin((th2 - th1)/2)*cos((th1 + th2)/2) / numPhiBins
+	//~ */	
+	//~ towerID_t const equatorialIndex_end = NumTowerBands();
+		
+	//~ for(towerID_t equatorialIndex = 0; equatorialIndex < equatorialIndex_end; ++equatorialIndex)
+	//~ {
+		//~ towerID_t const numPhiBins = towerID_t(std::round((2.*M_PI) / PhiWidth(equatorialIndex)));
+				
+		//~ // NO shortcuts; theta and equatorialAngle do not neccesarily map linearly
+		//~ double const theta1 = ToAbsTheta(double(equatorialIndex) * settings.squareWidth);
+		//~ double const theta2 = ToAbsTheta(double(equatorialIndex + 1) * settings.squareWidth);
+		
+		//~ // We assume that deltaPhi is the same over an entire band, true up to O(epsilon)
+		//~ double const dOmegaNorm = 
+			//~ std::sin(0.5*(theta2 - theta1))*std::cos(0.5*(theta1 + theta2)) / double(numPhiBins);
+		
+		//~ // This is an inefficient way to get the tower center; however, it is the most readable.
+		//~ // And we don't expect this function to get called very often
+		//~ for(towerID_t phiIndex = 0; phiIndex < numPhiBins; ++phiIndex)
+		//~ {
+			//~ towerID_t const towerIndex = equatorialIndex * settings.numPhiBins_centralBand + phiIndex;
+			//~ towerVec.push_back(GetTowerCenter(towerIndex) * dOmegaNorm);
+			//~ towerVec.push_back(towerVec.back());
+			//~ towerVec.back().x3 = -towerVec.back().x3; // emplace the backward detector
+		//~ }
+	//~ }
+	
+	//~ return towerVec;
 //~ }

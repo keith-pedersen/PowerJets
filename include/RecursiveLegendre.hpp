@@ -85,6 +85,8 @@ class RecursiveLegendre_Increment
 			Reset();
 		}
 		
+		~RecursiveLegendre_Increment(){} // Suppress inlining failure warnings
+		
 		size_t l() {return l_this;} //!< @brief The current Legendre index l.
 		
 		inline container_t const& P_lm2(){return *Pl_next;} //!< @brief \p P_{l-2}

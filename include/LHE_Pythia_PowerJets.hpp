@@ -1,12 +1,8 @@
 #ifndef LHE_PYTHIA_POWERJETS
 #define LHE_PYTHIA_POWERJETS
 
-// A program for calculating the smeared spectral power
 // By Keith.David.Pedersen@gmail.com (kpeders1@hawk.iit.edu)
 // Adapted from PYTHIA main11.cc (licenced under the GNU GPL version 2)
-
-// TODO: 
-// 1. Make shape functions return l=1--lMax, so there is never any mismatch
 
 #include "PowerJets.hpp"
 #include "PowerSpectrum.hpp"
@@ -24,7 +20,7 @@
 
 #include <QtCore/QSettings> // qt-devel package (CentOS 7), -lQtCore
 
-GCC_IGNORE(-Wpadded)
+GCC_IGNORE_PUSH(-Wpadded)
 
 class LHE_Pythia_PowerJets
 {
@@ -45,6 +41,7 @@ class LHE_Pythia_PowerJets
 		
 	private:
 		Pythia8::Pythia pythia; //! @brief The Pythia instance
+		Pythia8::Pythia* pileup; //! @brief A Pythia instance used for pileup
 		
 		//~ QSettings parsedINI; //! @brief The parsed ini file, used to control everything
 		ArrogantDetector* detector; //! @brief The detector
@@ -60,6 +57,10 @@ class LHE_Pythia_PowerJets
 		size_t abortCount;
 		//~ size_t lMax;
 		Status status;
+		
+		real_t mu_pileup; //! @brief average pileup per event (Poisson distribution)
+		real_t u_track; //! @brief Percent of track which falls within angular radius R
+		real_t angularResolutionFactor; //! @brief track radius R = angular-resolution times this factor
 				
 		// For now, we only cache the pieces we need
 		std::vector<vec3_t> detected; // The final state particles
@@ -68,7 +69,7 @@ class LHE_Pythia_PowerJets
 			detectorFilter; // The power spectrum for showered and detected particles
 		mutable std::vector<Jet> fast_jets; // Jest clustered from particle_cache using Fastjet
 		std::vector<Jet> ME_vec;
-		std::vector<vec4_t> pileup;
+		//~ std::vector<vec4_t> pileup;
 		
 		ShapeFunction* trackShape;
 		ShapeFunction* towerShape;
@@ -78,10 +79,10 @@ class LHE_Pythia_PowerJets
 		std::vector<PhatF> towers;
 		ShapedParticleContainer tracksTowers;
 		
-		enum class PileupBalancingScheme {back2back, shim};
-		real_t pileup_noise2signal;
-		real_t pileup_meanF;		
-		PileupBalancingScheme puBalancingScheme;		
+		//~ enum class PileupBalancingScheme {back2back, shim};
+		//~ real_t pileup_noise2signal;
+		//~ real_t pileup_meanF;		
+		//~ PileupBalancingScheme puBalancingScheme;		
 		
 		/*! @brief A place to redirect the FastJet banner.
 		 * 
@@ -89,14 +90,14 @@ class LHE_Pythia_PowerJets
 		*/ 
 		std::stringstream fastjet_banner_dummy;
 		
-		void ClearCache();
+		void Clear();
 		
 		Status Next_internal(bool skipAnal);
 		Status DoWork();
 		
 		void ClusterJets() const;
 		
-		void MakePileup();		
+		//~ void MakePileup();		
 		
 	public:
 		LHE_Pythia_PowerJets(std::string const& ini_filePath = ini_filePath_default);
@@ -110,11 +111,15 @@ class LHE_Pythia_PowerJets
 		
 		Status GetStatus() const {return status;}
 		
-		std::vector<vec3_t> const& Get_FinalState() const {return detector->FinalState();}
+		std::vector<vec4_t> const& Get_FinalState() const {return detector->FinalState();}
+		std::vector<PhatF> const& Get_Tracks() const {return tracks;}
+		std::vector<PhatF> const& Get_Towers() const {return towers;}
 		std::vector<vec3_t> const& Get_Detected() const {return detected;}
 		std::vector<Jet> const& Get_ME() const {return ME_vec;}
 		
-		std::vector<vec4_t> const& Get_Pileup() {return pileup;}
+		ArrogantDetector::Settings const& Get_DetectorSettings() const {return detector->GetSettings();}
+		
+		//~ std::vector<vec4_t> const& Get_Pileup() {return pileup;}
 		std::vector<Jet> const& Get_FastJets() const;
 		
 		void WriteAllVisibleAsTowers(std::string const& filePath);
@@ -143,6 +148,8 @@ class LHE_Pythia_PowerJets
 		// length follows an exponential distribution with mean = 1/lambda
 		static vec4_t IsoVec3_Exponential(pqRand::engine& gen, real_t const meanE);
 };
+
+GCC_IGNORE_POP
 
 // That transformation is best which transforms least
 // In relation to rotation matrices, we want one which is nearly diagonal. 
@@ -697,5 +704,4 @@ void BinnedSpectralPower::Fill_l1(size_t const edgeFactor)
 }
 */
 
-GCC_IGNORE_END
 #endif

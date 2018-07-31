@@ -1,22 +1,8 @@
 #include "LHE_Pythia_PowerJets.hpp"
 #include "SpectralPower.hpp"
 #include "kdp/kdpTools.hpp"
-
-void LHE_Pythia_PowerJets::ClearCache()
-{
-	detected.clear();
-	detected_PhatF.clear();
-	pileup.clear();
-	
-	Hl_FinalState.clear();
-	Hl_Obs.clear();
-		
-	fast_jets.clear();
-	ME_vec.clear();
-	
-	tracks.clear();
-	towers.clear();
-}
+#include "kdp/kdpStdVectorMath.hpp"
+#include <fstream>
 
 LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(std::string const& ini_filePath):
 	LHE_Pythia_PowerJets(QSettings(ini_filePath.c_str(), QSettings::IniFormat)) {}
@@ -25,25 +11,15 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(QSettings const& parsedINI):
 	// Because of chained defalt arguments, to send a false for printBanner, 
 	// we have to send the default value for xmlDir.
 	pythia("../xmldoc", false),
-		// Note: Must pass NativeFormat, otherwise it doesn't work.
+	pileup(nullptr),
 	detector(ArrogantDetector::NewDetector(parsedINI, "detector")),
-		// The detector's parameters are read from the INI folder [detector]
-	clusterAlg(), // initializd in main body			
-	//~ Hcomputer(parsedINI),
-		// HComputer's settings are read from the INI folder [power]
-	gen(), // deafult seed
+	clusterAlg(), // initializd in main body
+	gen(false), // delay seed
 	iEvent_plus1(0),	
-	//~ lMax(parsedINI.value("power/lMax", 128).toInt()),
 	status(Status::UNINIT),
+	mu_pileup(-1.), u_track(-1.), angularResolutionFactor(-1.),
 	trackShape(nullptr), towerShape(nullptr)
 {
-	// We could be using a file on disk which uses the default name.
-	// We will only use all default values when ini_filePath is not on disk.
-	//~ if(not std::ifstream(ini_filePath.c_str()))
-		//~ std::cerr << "\nWarning: No configuration file supplied ... everything default values.\n\n";
-	
-	kdp::LimitMemory(2.);
-	
 	/////////////////////
 	// Initialize fastjet
 	{
@@ -113,50 +89,102 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(QSettings const& parsedINI):
 		while((EventIndex() < skipEvents) and (Next_internal(true) == Status::OK));
 	}
 	
+	////////////////////
+	// Initialize pileup
 	{
-		trackShape = new h_Gaussian(kdp::ReadAngle<double>(
-			parsedINI.value("smear/tracks", "1 deg").toString().toStdString()));
-		trackShape->hl_Vec(1024lu);
+		// Support a Poisson distro, even though for now we round to integer
+		mu_pileup = std::max(0., parsedINI.value("pileup/mu_Pileup", 40.).toDouble());
 		
-		auto towerArea = detector->GetTowerArea();
-		std::vector<double> area2;
+		if(mu_pileup > 0.)
+		{
+			pileup = new Pythia8::Pythia("../xmldoc", false);
+			
+			std::string const pileupConf = parsedINI.value("pileup/pythiaConf", "").toString().toStdString();
+			
+			if(not std::ifstream(pileupConf).is_open())
+				throw std::runtime_error("LHE_Pythia_PowerJets: Pythia conf for pileup not found: <"
+					 + pileupConf + ">");
+					 
+			pileup->readFile(pileupConf.c_str());
+			pileup->init();			
+		}
+	}
+	
+	/////////////////////////
+	// Initialize track shape
+	{
+		u_track = parsedINI.value("smear/u_track", 0.9).toDouble();
+		angularResolutionFactor = parsedINI.value("smear/angularResolutionFactor", 1.).toDouble();
+	}
+	
+	/////////////////////////
+	// Initialize tower shape
+	{
+		//~ auto towerArea = detector->GetTowerArea();
+		//~ std::vector<double> area2;
 		
-		for(auto const& areaVec : towerArea)
-			area2.push_back(areaVec.Mag2());
+		//~ for(auto const& areaVec : towerArea)
+			//~ area2.push_back(areaVec.Mag2());
 		
-		std::sort(area2.begin(), area2.end()); 
+		//~ std::sort(area2.begin(), area2.end());
 		
-		towerShape = new h_Cap(std::sqrt(area2[area2.size() / 2]));
-		std::cout << "frac: " << std::sqrt(area2[area2.size() / 2])/(real_t(4)*M_PI) << std::endl;
-		towerShape->hl_Vec(1024lu);
+		//~ towerShape = new h_Cap(std::sqrt(area2[area2.size() / 2]));
 	}
 	
 	////////////////////
 	// Initialize pileup
-	pileup_meanF = parsedINI.value("pileup/meanF", 1e-2).toDouble(); // Negative value means no pileup
-	pileup_noise2signal = parsedINI.value("pileup/noise2signal", -1.).toDouble(); // Negative value means no pileup
+	//~ pileup_meanF = parsedINI.value("pileup/meanF", 1e-2).toDouble(); // Negative value means no pileup
+	//~ pileup_noise2signal = parsedINI.value("pileup/noise2signal", -1.).toDouble(); // Negative value means no pileup
 	
-	{
-		std::string puScheme = parsedINI.value("pileup/balancingScheme", "shim").toString().toStdString();
+	//~ {
+		//~ std::string puScheme = parsedINI.value("pileup/balancingScheme", "shim").toString().toStdString();
 		
-		if(puScheme == "back2back")
-			puBalancingScheme = PileupBalancingScheme::back2back;
-		else if(puScheme == "shim")
-			puBalancingScheme = PileupBalancingScheme::shim;
-		else
-			throw std::runtime_error("LHE_Pythia_PowerJets: pileup balancing scheme \"" + puScheme + "\" not recognized");
-	}
+		//~ if(puScheme == "back2back")
+			//~ puBalancingScheme = PileupBalancingScheme::back2back;
+		//~ else if(puScheme == "shim")
+			//~ puBalancingScheme = PileupBalancingScheme::shim;
+		//~ else
+			//~ throw std::runtime_error("LHE_Pythia_PowerJets: pileup balancing scheme \"" + puScheme + "\" not recognized");
+	//~ }
+}
+
+void LHE_Pythia_PowerJets::Clear()
+{
+	detector->Clear();
+	
+	detected.clear();
+	detected_PhatF.clear();
+		
+	Hl_FinalState.clear();
+	Hl_Obs.clear();
+	detectorFilter.clear();
+		
+	fast_jets.clear();
+	ME_vec.clear();
+	
+	tracks.clear();
+	towers.clear();
 }
 
 LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork()
 {
-	ClearCache();
+	Clear();
 	
 	if(status == Status::OK)
 	{
-		MakePileup();
+		detector->PartialFill(pythia, false); // isPileup = false
 		
-		(*detector)(pythia, pileup);
+		if(pileup)
+		{
+			size_t const nPileup = size_t(std::ceil(mu_pileup));
+			
+			for(size_t k = 0; k < nPileup; ++k)
+			{
+				pileup->next();
+				detector->PartialFill(*pileup, true); // isPileup = true
+			}
+		}
+		detector->Finalize();
 		
 		detected = detector->Tracks();
 		detected.insert(detected.end(), 
@@ -182,11 +210,15 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork()
 		for(auto& tower : towers)
 			tower.f /= totalE;
 			
+		real_t const angularResolution = PowerSpectrum::AngularResolution(
+			tracks, towers, detector->GetSettings().squareWidth);
+			
+		delete trackShape;
+		trackShape = new h_Gaussian(angularResolution*angularResolutionFactor, u_track);
+			
 		tracksTowers = ShapedParticleContainer(tracks, *trackShape);
 		tracksTowers.append(towers, *towerShape);
 			
-		//~ detected_PhatF = PhatF::To_PhatF_Vec(detected);
-		
 		// Transfer pythia ME into jets	
 		{
 			auto const finalState_ME = detector->ME();
@@ -209,39 +241,36 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool skipAnal)
 {
 	if(status == Status::UNINIT)
 		status = Status::OK;
-	
+		
+	// Returning immediately upon bad status preserves first status change from 
+	// other control logic (e.g., END_OF_FILE takes priority over EVENT_MAX)	
 	if(status == Status::OK)
 	{
 		// iEvent_plus1 enters as iEvent (i.e. it hasn't been incremented yet)
+		// Loop while we have more events to generate AND Pythia is failing
+		// Every iteration calls pythia.next() one more time
 		while((iEvent_plus1 < iEvent_end) and 
 			not (++iEvent_plus1, pythia.next())) // comma operator; do first command, return second
 			// We use comma op this to tie ++iEvent to every call to next()
 		{
-			// Loop while Pythia fails
-			
-			// If failure because reached end of file, then exit event loop.
-			if (pythia.info.atEndOfFile())
-			{
-				status = Status::END_OF_FILE;
-				break;
-			}
+			// If failure because reached end of file, return
+			if(pythia.info.atEndOfFile())
+				return (status = Status::END_OF_FILE);
 				
 			// First few failures write off as "acceptable" errors
-			if(++abortCount < abortsAllowed) continue;
-			else 
-			{
-				status = Status::ABORT_MAX;
-				break;
-			}
+			if(++abortCount < abortsAllowed) 
+				continue;
+			else // otherwise return failure
+				return (status = Status::ABORT_MAX);
 		}
 		
 		// Check for too many events
-		if((iEvent_plus1) > iEvent_end)
-			status = Status::EVENT_MAX;
+		if(iEvent_plus1 > iEvent_end)
+			return (status = Status::EVENT_MAX);
 	}
 	
 	if(skipAnal)
-		return status;				
+		return status;
 	
 	return DoWork();
 }
@@ -275,13 +304,13 @@ void LHE_Pythia_PowerJets::WriteAllVisibleAsTowers(std::string const& filePath)
 	{
 		char buffer[1024];
 		
-		auto const allAsTowers = detector->AllVisibleAsTowers();
+		auto const allAsTowers = detector->AllVisible_InTowers();
 		
 		for(auto const& tower : allAsTowers)
 		{
 			sprintf(buffer, "% .6e % .6e % .6e % .6e % .6e\n", 
-				tower.first[0], tower.first[1], tower.first[2], tower.first[3],
-				tower.second);
+				tower.eta_lower, tower.eta_upper, tower.phi_lower, tower.phi_upper,
+				tower.energy);
 			file << buffer;
 		}		
 	}
@@ -429,82 +458,82 @@ std::vector<LHE_Pythia_PowerJets::real_t> const& LHE_Pythia_PowerJets::Get_Detec
 	return detectorFilter;
 }
 
-void LHE_Pythia_PowerJets::MakePileup()
-{
-	pileup.clear();
+//~ void LHE_Pythia_PowerJets::MakePileup()
+//~ {
+	//~ pileup.clear();
 	
-	if(pileup_noise2signal > real_t(0))
-	{
-		real_t const pu_totalE_target = pileup_noise2signal * pythia.event.scale();
-		real_t const pu_meanE = pileup_meanF * pythia.event.scale();
+	//~ if(pileup_noise2signal > real_t(0))
+	//~ {
+		//~ real_t const pu_totalE_target = pileup_noise2signal * pythia.event.scale();
+		//~ real_t const pu_meanE = pileup_meanF * pythia.event.scale();
 		
-		assert(pu_meanE > real_t(0));
+		//~ assert(pu_meanE > real_t(0));
 		
-		real_t pu_TotalE = real_t(0);
-		real_t pu_maxE = real_t(-1);
+		//~ real_t pu_TotalE = real_t(0);
+		//~ real_t pu_maxE = real_t(-1);
 						
-		// Ensuring that pileup sums to zero is not trivial.
-		// Adding up isotropic 3-vectors creates a 3D random walk, 
-		// so while we expect (sum/n) to converge to zero, (sum) itself will diverge.
-		// I have found 2 methods which keep sum balanced:
-		//    1. Quick and dirty; draw a vector, add its opposite.
-		// 	2. Slightly less dirty; draw 2 vectors, add the opposite of their sum.
-		//		3. Monitor sum and whenever sum.Mag() gets too large,
-		//			"shim" it by adding a unit vector opposite of sum. 
-		//       Leave space for 2 unit vectors to neutralize the final sum.
-		// This latter was designed for isotropic unit vectors, so we will not use it.
-		// A quick study in Mathematica (ExponentialPileupBalancing) shows that
-		// method #2 does not egregiously alter the exponential distribution,
-		// only shifting up it's mean by about 10%
-		// (and slightly diminishing the probability of zero-energy particles).
+		//~ // Ensuring that pileup sums to zero is not trivial.
+		//~ // Adding up isotropic 3-vectors creates a 3D random walk, 
+		//~ // so while we expect (sum/n) to converge to zero, (sum) itself will diverge.
+		//~ // I have found 2 methods which keep sum balanced:
+		//~ //    1. Quick and dirty; draw a vector, add its opposite.
+		//~ // 	2. Slightly less dirty; draw 2 vectors, add the opposite of their sum.
+		//~ //		3. Monitor sum and whenever sum.Mag() gets too large,
+		//~ //			"shim" it by adding a unit vector opposite of sum. 
+		//~ //       Leave space for 2 unit vectors to neutralize the final sum.
+		//~ // This latter was designed for isotropic unit vectors, so we will not use it.
+		//~ // A quick study in Mathematica (ExponentialPileupBalancing) shows that
+		//~ // method #2 does not egregiously alter the exponential distribution,
+		//~ // only shifting up it's mean by about 10%
+		//~ // (and slightly diminishing the probability of zero-energy particles).
 		
-		switch(puBalancingScheme)
-		{
-			case PileupBalancingScheme::back2back:
-				while(pu_TotalE < pu_totalE_target)
-				{
-					pileup.push_back(IsoVec3_Exponential(gen, pu_meanE));
-					pileup.emplace_back(pileup.back().x0, -pileup.back().p(), kdp::Vec4from2::Energy);
+		//~ switch(puBalancingScheme)
+		//~ {
+			//~ case PileupBalancingScheme::back2back:
+				//~ while(pu_TotalE < pu_totalE_target)
+				//~ {
+					//~ pileup.push_back(IsoVec3_Exponential(gen, pu_meanE));
+					//~ pileup.emplace_back(pileup.back().x0, -pileup.back().p(), kdp::Vec4from2::Energy);
 					
-					pu_TotalE += 2. * pileup.back().x0;
-					pu_maxE = std::max(pu_maxE, pileup.back().x0);
+					//~ pu_TotalE += 2. * pileup.back().x0;
+					//~ pu_maxE = std::max(pu_maxE, pileup.back().x0);
 					
-					//~ if(pileup.size() > (size_t(1) << 10))
-						//~ throw std::runtime_error("problem");
-				}
-			break;
+					//~ // if(pileup.size() > (size_t(1) << 10))
+						//~ // throw std::runtime_error("problem");
+				//~ }
+			//~ break;
 			
-			case PileupBalancingScheme::shim:
-				while(pu_TotalE < pu_totalE_target)
-				{
-					vec3_t sum;
+			//~ case PileupBalancingScheme::shim:
+				//~ while(pu_TotalE < pu_totalE_target)
+				//~ {
+					//~ vec3_t sum;
 					
-					for(size_t i = 0; i < 2; ++i)
-					{
-						pileup.push_back(IsoVec3_Exponential(gen, pu_meanE));
-						sum += pileup.back().p();
+					//~ for(size_t i = 0; i < 2; ++i)
+					//~ {
+						//~ pileup.push_back(IsoVec3_Exponential(gen, pu_meanE));
+						//~ sum += pileup.back().p();
 						
-						pu_TotalE += pileup.back().x0;
-						pu_maxE = std::max(pu_maxE, pileup.back().x0);
-					}
+						//~ pu_TotalE += pileup.back().x0;
+						//~ pu_maxE = std::max(pu_maxE, pileup.back().x0);
+					//~ }
 					
-					pileup.emplace_back(0., -sum, kdp::Vec4from2::Mass);
-					pu_TotalE += pileup.back().x0;
-					pu_maxE = std::max(pu_maxE, pileup.back().x0);
-				}
-			break;
-		}
+					//~ pileup.emplace_back(0., -sum, kdp::Vec4from2::Mass);
+					//~ pu_TotalE += pileup.back().x0;
+					//~ pu_maxE = std::max(pu_maxE, pileup.back().x0);
+				//~ }
+			//~ break;
+		//~ }
 			
-		// THe lesson below: Added naively, pileup's random walk 
-		// creates a large momentum imbalance which cannot be accounted for 
-		// by the addition of a single particle opposite the total, 
-		// because the energy of that single particle is way too large.
-		// The results of the first few events examined:
-		// 1-CDF: {1.886e-03, 3.987e-04, 8.038e-05, 1.551e-05, 1.762e-04, 5.858e-03, 9.268e-08}
-		//
-		// CDF: 1 − e−λx
-		// λ = 1 / pu_meanE
-		// double const puTotalP = std::accumulate(pileup.begin(), pileup.end(), vec3_t()).Mag();
-		// printf("1-CDF: %.3e\n", std::exp(-puTotalP/pu_meanE));
-	}
-}
+		//~ // THe lesson below: Added naively, pileup's random walk 
+		//~ // creates a large momentum imbalance which cannot be accounted for 
+		//~ // by the addition of a single particle opposite the total, 
+		//~ // because the energy of that single particle is way too large.
+		//~ // The results of the first few events examined:
+		//~ // 1-CDF: {1.886e-03, 3.987e-04, 8.038e-05, 1.551e-05, 1.762e-04, 5.858e-03, 9.268e-08}
+		//~ //
+		//~ // CDF: 1 − e−λx
+		//~ // λ = 1 / pu_meanE
+		//~ // double const puTotalP = std::accumulate(pileup.begin(), pileup.end(), vec3_t()).Mag();
+		//~ // printf("1-CDF: %.3e\n", std::exp(-puTotalP/pu_meanE));
+	//~ }
+//~ }
