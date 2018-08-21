@@ -1,8 +1,8 @@
 #ifndef LHE_PYTHIA_POWERJETS
 #define LHE_PYTHIA_POWERJETS
 
-// By Keith.David.Pedersen@gmail.com (kpeders1@hawk.iit.edu)
-// Adapted from PYTHIA main11.cc (licenced under the GNU GPL version 2)
+// Copyright (C) 2018 Keith Pedersen (Keith.David.Pedersen@gmail.com)
+// Adapted from PYTHIA main11.cc and main19.cc (licenced under the GNU GPL version 2)
 
 #include "PowerJets.hpp"
 #include "PowerSpectrum.hpp"
@@ -12,77 +12,210 @@
 
 #include "fastjet/ClusterSequence.hh"
 
-#include "Pythia8/Pythia.h"
+#include <Pythia8/Pythia.h>
 
 #include <vector>
 #include <string>
-#include <sstream>
 
 #include <QtCore/QSettings> // qt-devel package (CentOS 7), -lQtCore
 
+/*! @file LHE_Pythia_PowerJets.hpp
+ *  @brief Defines an object which runs Pythia on an LHE file and 
+ *  analyzes the final state using the PowerJets package.
+ *  @author Copyright (C) 2018 Keith Pedersen (Keith.David.Pedersen@gmail.com, https://wwww.hepguy.com)
+*/
+
 GCC_IGNORE_PUSH(-Wpadded)
 
+/*! @brief A Pythia generator which runs from an LHE file and 
+ *  analyzes the showered, hadronized final state using the PowerJets package.
+ *  
+ *  Pythia is a Monte Carlo simulator for particle collisions and jet formation. 
+ *  A common use case has an external program (such as MadGraph) 
+ *  outputting a collection of parton-level collisions (the "matrix element") into an LHE file.
+ *  Pythia can then read the LHE and dress the matrix element into a 
+ *  more complete physics process (e.g., simulate jet formation to detectable particles, 
+ *  initial state radiation, multi-parton interactions, pileup, etc.).
+ * 
+ *  Once LHE_Pythia_PowerJets is constructed, Next() must be called at least once.
+ *  Each time Next() is called, a new event is generated and analyzed.
+ * 
+ *  The LHE_Pythia_Pileup is controlled via an INI file using keys in named sections:
+ *   
+ *   - Main: General control (e.g. the title of the detector section in the INI file)
+ * 
+ *   - Pythia: How this object runs Pythia (e.g. the location of the LHE file).
+ * 
+ *   - PowerJets: To calculate an accurate power spectrum, 
+ *     charged particles are smeared using h_PseudoNormal with a lambda 
+ *     determined by the following formula: a circular cap of 
+ *     radius \f$ \in R [0, \pi] \f$ contains a fraction \f$ u \in (0, 1] \f$ 
+ *     of the particle's spatial probability distribution.
+ *     R is determined from the sample's overall angular resolution.
+ * 
+ *   - FastJet: The final state is clustered using FastJet's inclusive clustering algorithms.
+ * 
+ *   - Pileup: A second Pythia generator is used to generate LHC-like pileup,
+ *     which can be added to each event. It is assumed that all charged 
+ *     pileup which \em can be tracked (within the tracker's \f$ \eta \f$ coverage
+ *     and with enough transverse momentum) \em is tracked to a vertex 
+ *     distinguishable from the primary vertex (and thus can be removed from the hard scatter).
+ *     Neutral pileup cannot be subtracted.
+ * 
+ *  LHE_Pythia_PowerJets::Settings explains the available keys in detail
+*/  
 class LHE_Pythia_PowerJets
 {
 	public:
 		using real_t = PowerJets::real_t;
 		using PhatF = PowerSpectrum::PhatF;
+		using VecPhatF = PowerSpectrum::VecPhatF;
 		using PhatFvec = PowerSpectrum::PhatFvec;
 		using ShapedParticleContainer = PowerSpectrum::ShapedParticleContainer;
+		using DetectorObservation = PowerSpectrum::DetectorObservation;
 
-		using vec3_t = ArrogantDetector::vec3_t;
-		using vec4_t = ArrogantDetector::vec4_t;
+		using vec3_t = ArrogantDetector::vec3_t; //! @brief The 3-vector type
+		using vec4_t = ArrogantDetector::vec4_t; //! @brief The 4-vector type
 		
-		enum class Status {OK, UNINIT, END_OF_FILE, EVENT_MAX, ABORT_MAX};
+		//! @brief A strongly-typed enum to communicate the state of the internal Pythia generator
+		enum class Status {OK //! @brief Everything is OK
+			, UNINIT //! @brief Pythia has not run yet; call Next()
+			, END_OF_FILE //! @brief We have reached the end of the LHE file, no more events to generate
+			, EVENT_MAX  //! @brief We hit the maximum number of events and stopped generating
+			, ABORT_MAX //! @brief Pythia aborted too many times ... something's wrong
+			};
 		
-		static constexpr char const* const ini_filePath_default = "PowerJets.conf";
+		static constexpr char const* const INI_filePath_default = "PowerJets.ini";
 		
+		//! @brief Average jet energy fraction carried by charged particles (measured at LHC)
 		static constexpr real_t chargeFraction = real_t(0.59);
 		
+		/*! @brief The settings used by LHE_Pythia_PowerJets
+		 * 
+		 *  This class is designed to work in concert with a QSettings INI file, 
+		 *  which uses "keys", in sections, to define values.
+		 *  Each settings is initilialized by a Param<T>(key, default_value)
+		*/ 
+		struct Settings : public kdp::Settings_Base
+		{
+			///////////////////////////////////////////////////////////////
+			// Main
+			///////////////////////////////////////////////////////////////
+			/*! @brief The name of the INI section which sets the detector parameters
+			 * 
+			 *  This section name is passed to ArrogantDetector::NewDetector, 
+			 *  which reads all detector settings from this section.
+			*/
+			Param<std::string> Main__detectorName = Param<std::string>("Main/detectorName", "Detector");
+			
+			///////////////////////////////////////////////////////////////
+			// Pythia
+			///////////////////////////////////////////////////////////////
+			
+			/*! @brief The path to the LHE file
+			 * 
+			 *  The LHE file can also be controlled by setting Beams:LHEF = \p filePath
+			 *  in the Pythia conf file (which will override this setting).
+			*/ 
+			Param<std::string> Pythia__lhePath = Param<std::string>("Pythia/lhePath", "./unweighted_events.lhe.gz");
+			
+			//! @brief How many events to skip
+			Param<size_t> Pythia__skipEvents = Param<size_t>("Pythia/skipEvents", 0);
+			
+			/*! @brief The maximum number of events to generate before Next() has no effect
+			 * 
+			 *  The default value is -1, which creates the largest possible size_t, 
+			 *  so that generation continues until the LHE file runs dry
+			*/ 
+			Param<size_t> Pythia__maxEvents = Param<size_t>("Pythia/maxEvents", -1);
+			
+			//! @brief The maximum number of Pythia aborts to allow before stopping
+			Param<size_t> Pythia__abortsAllowed = Param<size_t>("Pythia/abortsAllowed", 10);
+			
+			//! @brief The filepath for Pythia.conf file that controls all other Pythia settings (e.g., tunes, MPI = on, etc)
+			Param<std::string> Pythia__confPath = Param<std::string>("Pythia/confPath", "./Pythia.conf");
+			
+			///////////////////////////////////////////////////////////////
+			// PowerJets
+			///////////////////////////////////////////////////////////////
+			
+			//! @brief The track radius R is this factor (fR) multiplied by the sample's angular resolution 
+			Param<double> PowerJets__fR_track = Param<double>("PowerJets/fR_track", 1.);
+			
+			//! @brief The fraction u of each track contained within a cap of radius R
+			Param<double> PowerJets__u_track = Param<double>("PowerJets/u_track", 0.9);
+			
+			///////////////////////////////////////////////////////////////
+			// fastjet
+			///////////////////////////////////////////////////////////////
+			
+			//! @brief The clustering algorithm ("kt", "CA" (Cambridge-Aacen), "anti-kt")
+			Param<std::string> FastJet__algo = Param<std::string>("FastJet/algo", "anti-kt");
+			
+			//! @brief The clustering radius
+			Param<double> FastJet__R = Param<double>("FastJet/R", 0.4);
+			
+			///////////////////////////////////////////////////////////////
+			// fastjet
+			///////////////////////////////////////////////////////////////
+			
+			/*! @brief The exact number of pileup vertices.
+			 * 
+			 *  This is a placeholder for the mean of a Poisson distribution, 
+			 *  which will be implemented eventually.
+			*/ 
+			Param<double> Pileup__mu = Param<double>("Pileup/mu", 40.);
+			
+			/*! @brief The file path for a separate Pythia.conf file to 
+			 *  control pileup generation.
+			 * 
+			 *  It should at least set "SoftQCD:all = on" and "Beams:eCM = 2 * SomeEnergy"
+			*/ 
+			Param<std::string> Pileup__confPath = Param<std::string>("Pileup/confPath", "./Pileup.conf");
+			
+			Settings(QSettings const& parsedINI);
+			~Settings() {}
+		};
+		
 	private:
-		Pythia8::Pythia pythia; //! @brief The Pythia instance
-		Pythia8::Pythia* pileup; //! @brief A Pythia instance used for pileup
+		Pythia8::Pythia pythia; //!< @brief The Pythia instance
+		Pythia8::Pythia* pileup; //!< @brief A secondary Pythia instance, used for pileup
 		
-		//~ QSettings parsedINI; //! @brief The parsed ini file, used to control everything
-		ArrogantDetector* detector; //! @brief The detector
-			// This is a pointer so we can have either lepton or hadron detector
-			// In the future we can add something like Delphes
-		fastjet::JetDefinition clusterAlg; //! @brief FastJet's clustering algorithm
-		//~ SpectralPower Hcomputer; //! @brief calculates spectral power
-		pqRand::engine gen; //! A PRNG
+		/*! @brief The detector
+		 *  
+		 *  This is a pointer so we can have either 
+		 *  ArrogantDetector_Lepton or ArrogantDetector_Hadron.
+		*/ 
+		ArrogantDetector* detector; 
 		
-		size_t iEvent_plus1;
-		size_t iEvent_end;
-		size_t abortsAllowed;
+		mutable PowerSpectrum Hl_computer; //!< @brief A thread pool to calculate the power spectrum
+		fastjet::JetDefinition clusterAlg; //!< @brief FastJet's clustering algorithm
+		//~ pqRand::engine gen; //!< @brief A PRNG
+		
+		size_t nextCount; //!< @brief The number of times Next() has been called
+		size_t nextCount_max; //!< @brief The maximum nextCount before Next() has no effect
 		size_t abortCount;
-		//~ size_t lMax;
-		Status status;
+		Status status; //!< @brief The status of the generator
 		
-		real_t mu_pileup; //! @brief average pileup per event (Poisson distribution)
-		real_t u_track; //! @brief Percent of track which falls within angular radius R
-		real_t angularResolutionFactor; //! @brief track radius R = angular-resolution times this factor
+		Settings settings;
 				
 		// For now, we only cache the pieces we need
-		std::vector<vec3_t> detected; // The final state particles
-		std::vector<PhatF> detected_PhatF; // The final state particles
-		std::vector<real_t> Hl_FinalState, Hl_Obs, 
-			detectorFilter; // The power spectrum for showered and detected particles
-		mutable std::vector<Jet> fast_jets; // Jest clustered from particle_cache using Fastjet
-		std::vector<Jet> ME_vec;
-		//~ std::vector<vec4_t> pileup;
+		std::vector<vec3_t> detected; //!< @brief The final state particles
+		mutable std::vector<real_t> Hl_Obs; //!< @brief The power spectrum of detector particles (in the lab frame)
+		mutable std::vector<Jet> fast_jets; //!< @brief Jets clustered from \ref detected using FastJet
+		//~ mutable std::vector<real_t> detectorFilter; //!< @brief The "up" coefficient for the detector
+			
+		//~ DetectorObservation observation; //!< @brief The raw detector observation
+		ShapedParticleContainer tracksTowers; //!< @brief The extensive tracks and towers
 		
-		ShapeFunction* trackShape;
-		ShapeFunction* towerShape;
-		
-		PowerSpectrum Hl_computer;
-		std::vector<PhatF> tracks;
-		std::vector<PhatF> towers;
-		ShapedParticleContainer tracksTowers;
+		// Original, isotropic pileup
 		
 		//~ enum class PileupBalancingScheme {back2back, shim};
 		//~ real_t pileup_noise2signal;
 		//~ real_t pileup_meanF;		
 		//~ PileupBalancingScheme puBalancingScheme;		
+		
+		//~ void MakePileup();
 		
 		/*! @brief A place to redirect the FastJet banner.
 		 * 
@@ -90,63 +223,111 @@ class LHE_Pythia_PowerJets
 		*/ 
 		std::stringstream fastjet_banner_dummy;
 		
-		void Clear();
+		void Clear(); //!< @brief Clear all caches
 		
-		Status Next_internal(bool skipAnal);
-		Status DoWork();
+		/*! @brief Call pythia.Next(), check for errors, then "do work" if requested
+		 * 
+		 *  If \p doWork is false, no attempt is made to detect or analyze the final state.
+		 *  This is used to skip the first events in an LHE file
+		 *  while still running the skipped events through Pythia so that 
+		 *  its PRNG is called the same number of times.
+		 *  This ensures that event_10 will look the same regardless if 
+		 *  event_0 through event_9 are analyzed.
+		*/  
+		Status Next_internal(bool doWork);		
+		Status DoWork(); //!< @brief Detect and analyze the event
 		
-		void ClusterJets() const;
-		
-		//~ void MakePileup();		
+		//!< @brief Cluster the final state with FastJet, caching the clustered jets
+		void ClusterJets() const; 
 		
 	public:
-		LHE_Pythia_PowerJets(std::string const& ini_filePath = ini_filePath_default);
+		//! @brief Construct a QSettings object and call the other constructor
+		LHE_Pythia_PowerJets(std::string const& INI_filePath = INI_filePath_default);
+		
+		//! @brief Read settings from the INI file and initialize the generators
 		LHE_Pythia_PowerJets(QSettings const& parsedINI);
 		
 		~LHE_Pythia_PowerJets();
 		
 		//////////////////////////////////////////////////////////////////
 		
-		size_t EventIndex() const {return iEvent_plus1 - 1;}
+		/*! @brief Generate the next event and analyze
+		 * 
+		 *  \returns Returns the status of the generator.
+		*/
+		Status Next() {return Next_internal(true);} // doWork = true
 		
+		//~ Status Repeat() {return DoWork();}
+		
+		//! @brief The index of the current event
+		size_t EventIndex() const {return nextCount - 1;}
+		
+		//! @brief The current status of the generator
 		Status GetStatus() const {return status;}
 		
-		std::vector<vec4_t> const& Get_FinalState() const {return detector->FinalState();}
-		std::vector<PhatF> const& Get_Tracks() const {return tracks;}
-		std::vector<PhatF> const& Get_Towers() const {return towers;}
+		//! @brief Get a list of all tracks and towers detected in the event
 		std::vector<vec3_t> const& Get_Detected() const {return detected;}
-		std::vector<Jet> const& Get_ME() const {return ME_vec;}
 		
-		ArrogantDetector::Settings const& Get_DetectorSettings() const {return detector->GetSettings();}
+		//! @brief Convert the LHE matrix element (parton-level event) into Jet's
+		std::vector<Jet> const Get_ME() const 
+			{return std::vector<Jet>(detector->ME().cbegin(), detector->ME().cend());}
 		
 		//~ std::vector<vec4_t> const& Get_Pileup() {return pileup;}
+		
+		//! @brief Cluster the detected particles into jets and return
 		std::vector<Jet> const& Get_FastJets() const;
 		
-		void WriteAllVisibleAsTowers(std::string const& filePath);
+		Settings const& Get_Settings() const {return settings;}
+		
+		ArrogantDetector const* Get_Detector() const {return detector;}
+		
+		//! @brief Calculate the power spectrum of the observed final state
+		std::vector<real_t> const& Get_Hl_Obs(size_t const lMax) const;
+		
+		//! @brief Calculate the power spectrum of an ensemble of ShapedJet's
+		std::vector<real_t> Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets) const;
+		
+		/*! @brief Calculate the "hybrid" power spectrum between jets and the observed final state
+		 * 
+		 *  See PowerSpectrum::Hl_Hybrid for more details
+		*/ 
+		std::vector<real_t> Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets) const;
+		
+		/*! @brief Bin all detector into the calorimeter, 
+		 *  then write the tower edges and energy to a file.
+		 * 
+		 *  This is useful for generating LEGO plots
+		*/ 
+		void WriteAllVisibleAsTowers(std::string const& filePath) const;
 		
 		//! @brief (tau * h_l^trk + (1-tau) * h_l^twr)
-		std::vector<real_t> const& Get_DetectorFilter(size_t const lMax);
+		//~ std::vector<real_t> const& Get_DetectorFilter(size_t const lMax);		
 		
-			//~ std::vector<PhatF> const& Get_Detected_PhatF() const {return detected_PhatF;}
+		//~ std::vector<vec4_t> const& Get_FinalState() const {return detector->FinalState();}
+		/*! @brief Get the observation in the lab frame
+		 *  
+		 *  TODO: add support for boost.
+		*/ 
+		//~ DetectorObservation const& Get_Observation() const {return observation;}
+		//~ std::vector<vec3_t> const& Get_Tracks() const {return detector->Tracks();}
+		//~ std::vector<vec3_t> const& Get_Towers() const {return detector->Towers();}
 		
+		//~ ArrogantDetector::Settings const& Get_DetectorSettings() const {return detector->GetSettings();}
+				
+		// Using SpectralPower.hpp; used these calls to validate PowerSpectrum
+		//~ std::vector<real_t> Get_Hl_Obs_slow(size_t const lMax);
+		//~ std::vector<real_t> Get_Hl_Jet_slow(size_t const lMax, std::vector<ShapedJet> const& jets);
+		//~ std::vector<real_t> Get_Hl_Hybrid_slow(size_t const lMax, std::vector<ShapedJet> const& jets);		
+		
+		// These are all easy to calculate using the PowerSpectrum framework
 		//~ std::vector<real_t> const& Get_H_showered(size_t const lMax);	
 		//~ std::vector<real_t> const& Get_H_det(size_t const lMax);		
-		//~ std::vector<real_t> const& Get_H_extensive(size_t const lMax);
+		//~ std::vector<real_t> const& Get_H_extensive(size_t const lMax);		
+		//~ std::vector<real_t> const& Get_Hl_FinalState(size_t const lMax);
 		
-		std::vector<real_t> const& Get_Hl_FinalState(size_t const lMax);
-		std::vector<real_t> const& Get_Hl_Obs(size_t const lMax);
-		std::vector<real_t> Get_Hl_Obs_slow(size_t const lMax);
-		std::vector<real_t> Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets);
-		std::vector<real_t> Get_Hl_Jet_slow(size_t const lMax, std::vector<ShapedJet> const& jets);
-		std::vector<real_t> Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets);
-		std::vector<real_t> Get_Hl_Hybrid_slow(size_t const lMax, std::vector<ShapedJet> const& jets);
-				
-		Status Next() {return Next_internal(false);}
-		Status Repeat() {return DoWork();}
-
 		// Give me a vector pointing in an isotropic direction whose 
 		// length follows an exponential distribution with mean = 1/lambda
-		static vec4_t IsoVec3_Exponential(pqRand::engine& gen, real_t const meanE);
+		//~ static vec4_t IsoVec3_Exponential(pqRand::engine& gen, real_t const meanE);
 };
 
 GCC_IGNORE_POP

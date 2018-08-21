@@ -16,7 +16,7 @@ STD = c++11
 # -pedantic-errors is like -Wpedantic, except the warnings become errors
 STABILITY_FLAGS = -pedantic-errors -fno-common -mfpmath=sse -mieee-fp #sse flag to avoid weird x87 registers (see https://gcc.gnu.org/wiki/FloatingPointMath)
 STABILITY_WARNINGS = -Wall -Wextra -W -Wconversion -Wshadow -Wpointer-arith -Wcast-qual -Wcast-align -Wwrite-strings -Wformat -Wmissing-declarations -Wredundant-decls -Wmissing-field-initializers -Wlogical-op -Wundef -Wfloat-equal -Wdouble-promotion -Wstrict-aliasing # -Wunsafe-loop-optimizations -Wuseless-cast
-PERFORMANCE_FLAGS = -O2 -march=$(MARCH) -msse4 -mavx2 -Winline -Wdisabled-optimization -Wpadded -ftree-vectorize -funsafe-loop-optimizations -Wvector-operation-performance # vectorize is the only thing from O3 that we want
+PERFORMANCE_FLAGS = -O2 -march=$(MARCH) -msse4.2 -mavx2 -Winline -Wdisabled-optimization -Wpadded -ftree-vectorize -funsafe-loop-optimizations -Wvector-operation-performance # vectorize is the only thing from O3 that we want
 BUILD_LIB_FLAGS = -fPIC
 # 
 CXXFLAGS = -std=$(STD) $(STABILITY_WARNINGS) $(PERFORMANCE_FLAGS) $(BUILD_LIB_FLAGS) -g #-ftree-vectorizer-verbose=1 # -fopt-info-vec-optimized
@@ -34,7 +34,7 @@ LIB_FLAGS = $(EXTERN_LIB_FLAGS) -L $(PJ_DIR) -lpJets
 EXAMPLES_CPP = $(wildcard examples/*.cpp)
 EXAMPLES_X = $(patsubst %.cpp, %.x, $(EXAMPLES_CPP))
 
-FILENAMES = ArrogantDetector SpectralPower NjetModel LHE_Pythia_PowerJets ShapeFunction PowerSpectrum
+FILENAMES = PowerSpectrum ArrogantDetector SpectralPower NjetModel LHE_Pythia_PowerJets ShapeFunction 
 OBJS = $(addsuffix .o, $(addprefix $(SOURCE)/, $(FILENAMES)))
 
 all : lib $(EXAMPLES_X)

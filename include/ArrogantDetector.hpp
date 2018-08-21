@@ -1,76 +1,98 @@
 #ifndef ARROGANT_DETECTOR
 #define ARROGANT_DETECTOR
 
+// Copyright (C) 2018 by Keith Pedersen (Keith.David.Pedersen@gmail.com)
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "PowerJets.hpp"
+#include "PowerSpectrum.hpp"
 #include "kdp/kdpTools.hpp"
 #include "Pythia8/Pythia.h"
 #include "Pythia8/Event.h"
 #include <QtCore/QSettings>
 
+#include "kdp/kdpSettings.hpp"
+
+/*! @file ArrogantDetector.hpp
+ *  @brief Defines an abstract detector classes and two implementations
+ *  @author Copyright (C) 2018 Keith Pedersen (Keith.David.Pedersen@gmail.com, https://wwww.hepguy.com)
+*/ 
+
 GCC_IGNORE_PUSH(-Wpadded)
+ 
+////////////////////////////////////////////////////////////////////////
 
-/*! @brief A tower object that stores 3-momentum and fractional solid angle (Omega / (4 pi))
+/*! @brief A very basic particle detector for phenomenological studies
  *  
- *  Fields are public, just like the vec3_t it contains (WAAH).
-*/
-struct Tower
-{
-	using vec3_t = PowerJets::vec3_t;
-	using real_t = PowerJets::real_t;
-		
-	vec3_t p3; //!< @brief 3-momentum of massless tower
-	real_t fOmega; //!< @brief fractional solid angle (Omega / (4 pi))
-	
-	Tower(vec3_t const& p3_in, real_t const fOmega_in):
-		p3(p3_in), fOmega(fOmega_in) {}
-	
-	operator vec3_t() const {return p3;}
-};
-
-/*! @brief A very basic detector for phenomenological studies
- *  
- *  This detector is arrogant because it makes some rather extreme assumptions:
- *   - Any particle with |eta| < etaMax_cal is detected in tracks or towers.
- *   - Any charged particle with |eta| < etaMax_track and |pT| > minPT is detected \em perfectly,
+ *  This detector class is designed to replicate the very basic 
+ *  functionality of an LHC-like particle detector (where the 
+ *  longitudinal direction is defined to be parallel to the colliding beams).
+ *  Such a detector has two major components:
+ * 
+ *   - A "tracker" to detect the passage of charged particles.
+ *     - Charged particles ionize the detection medium, 
+ *     leaving highly-localized (sub-mm) blips that can be 
+ *     connected into a track with extremely good angular resolution.
+ *     A longitudinal magnetic field (parallel to the beam line)
+ *     deflects the charged particles, with each track's 
+ *     radius of curvature being proportional to its momentum.
+ * 
+ *   - A "calorimeter" to detect particle energy. 
+ *      - Calorimeters are nearly hermitic sensors (two holes for the beam line)
+ *     that measure the kinetic energy of moving particles.
+ *     They are segmented into square cells, and in a crude sense, 
+ *     can only determine how much energy is deposited into each cell 
+ *     (not the location within the cell where this energy was deposited).
+ *     This gives the calorimeter much poorer angular resolution than the tracker.
+ * 
+ *      - The energy deposited in each cell is called a "tower" 
+ *     (because if you unroll the surface of the calorimeter onto a plane, 
+ *     and show the energy in each cell with a 2D histogram, 
+ *     each active cell looks like a tower or skyscraper). 
+ *     Both charged and neutral particles deposit their energy into towers,
+ *     but charged particles are also seen in the tracker.
+ *     Their tracks can be extrapolated to the tower they struck, 
+ *     and their energy subtracted (via their well-measured momentum).
+ *     This leaves a tower of neutral energy. *     
+ * 
+ *  In our initial investigations of the angular power spectrum of QCD jets, 
+ *  it is important to understand the implications of the different 
+ *  angular resolutions provided by tracks and towers.
+ *  We therefore simulate a detector with perfect energy resolution, 
+ *  and only the most bare-bones approximation of angular resolution.
+ * 
+ *   - Any particle with pseudorapidity \f$ |\eta| < \eta_{\max}^{\rm cal} \f$
+ *     is detected.
+ * 
+ *   - Any charged particle with \f$ |\eta| < \eta_{\max}^{\rm trk} \f$ and 
+ *     transverse momentum \f$ |p_T| > p_T^{\min,\rm trk} \f$ is detected \em perfectly,
  *     with perfect track subtraction from the calorimeter.
- *   - Because there is no simulation of the magnetic field, 
+ * 
+ *   - We assume there is a magnetic field (to measure track momentum), 
+ *     but do not simulate track deflection. Therefore, 
  *     untracked charged particles (loopers) do not strike the endcap,
- *     propagating in a straight line (as if they were neutral) to the calorimeter.
+ *     instead propagating in a straight line (as if they were neutral) to the calorimeter.
+ * 
  *   - There are no material interactions or measurement errors;
  *     all energy and angles are perfect.
  *  
- *  To create a working ArrogantDetector, the derived class must define the functions
- *  NumPhiBins() and PhiWidth() and fill etaBeltEdges in the ctor.
- *  The derived ctor shall also call Init_InDerivedCtor().
- * 
- *  four functions which determine the calorimeter scheme.
- * 
- *  ArrogantDetector's calorimeter uses an equatorial "angle" \a t
- *  (where \f$ \hat{z} \to +t_{max} \f$, \f$ -\hat{z} \to -t_{max} \f$,
- *  and the transverse plane is at \f$ t=0 \f$). The user must define
- *  the equatorial angle via: 
- *   - AbsEquatorialAngle() return \f$ |t| \f$, given a 4-vector.
- *   - ToAbsTheta() maps \f$ |t| \f$ onto the standard equatorial angle theta.
- * 
- *  \f$ |t| \f$ is used to define a bijective map between
- *  detector coordinates and a unique towerID:
- *   - GetTowerID() maps forward detector coordinates to calorimeter \p towerID.
- *   - GetTowerEdges() maps \p towerID to the tower's edges
- * 
- *  The forward (t > 0) and backward (t < 0) halves of the detector are stored separately, 
- *  so the \p towerID scheme only needs to depend on absolute |t|. 
- *  This dramatically simplifies the ID scheme. 
- *  The default \p towerID scheme creates ``square'' towers of 
- *  uniform width in \a t, so the simplest derived class need only 
- *  additionally define the width of towers in \a phi via PhiWidth().
+ *  The calorimeter is composed of belts of towers, 
+ *  where each tower in a given belt has the same pseudorapidity boundaries
+ *  and the same width in phi (DeltaPhi()). See TowerID for more information.
+ *  
+ *  The calorimeter is configured via the Settings read from an INI file
+ *  (see \ref ArrogantDetector::Settings).
+ *   
+ *  To create a working ArrogantDetector, the derived class must define
+ *  the calorimeter grid by defining PhiWidth() and, in its derived ctor, 
+ *  fill beltEdges_eta with the lower edges (in pseudorapidity eta) 
+ *  of every calorimeter belt, as well as the maximum eta of the final belt
+ *  (which shall be <= settings.etaMax_cal).
+ *  The derived ctor shall then call Init_InDerivedCtor().
 */
-
-// 1. Read out towers via towerID. 
-//     - from edges, calculate geometric center and fractional area
-//     - 3-vector and fractional area. 
-//     - boost along z-axis, alter z-momentum
-//     - from new z-momentum, look up new fractional area
-//     - fractional area is identical for every belt!
 class ArrogantDetector
 {
 	/////////////////////////////////////////////////////////////////////
@@ -92,42 +114,62 @@ class ArrogantDetector
 		 *           |___/  |_|                                                                           		*/
 		////////////////////////////////////////////////////////////////////////////////////////////////////////
 		 
-		typedef typename kdp::Vector3<double> vec3_t; //!< @brief The 3-vector type
-		typedef typename kdp::Vector4<double> vec4_t; //!< @brief The 4-vector type
+		using vec3_t = kdp::Vector3<double>; //!< @brief The 3-vector type
+		using vec4_t = kdp::Vector4<double>; //!< @brief The 4-vector type
+		using DetectorObservation = PowerSpectrum::DetectorObservation;
+		
+		static constexpr char const* detectorName_default = "Detector";
 	
-		//! @brief The main ArrogantDetector settings, read from a parsed INI file.
-		class Settings
+		/*! @brief The main ArrogantDetector settings, read from a parsed INI file
+		 *  from section "[detectorName]"
+		 * 
+		 *  Each parameter is defined using <tt> Param<T>(key, default value) </tt>
+		*/ 
+		class Settings : public kdp::Settings_Base
 		{
 			friend class ArrogantDetector;
 			
 			private:
-				static double Read_double(QSettings const& parsedINI, 
-					std::string const& detectorName, std::string const& key, 
-					double const defaultVal);
-					
-				// Read in the requested squareWidth, which is the phi width of towers in the central belt, 
-				// then round it so that there are an even number of towers in the central belt.
-				// Use this integer to define the actual squareWidth
-				
-				// Hide the ctor from the public
+				//! @brief Read in all settings, rounding squareWidth so that 
+				//! there are an integer number of phi bins in the central belt
 				Settings(QSettings const& parsedINI, std::string const& detectorName);
 					
 			public:
-				static constexpr auto squareWidth_default = "5 deg";
-				static constexpr auto etaMax_cal_default = 5.;
-				static constexpr auto etaMax_track_default = 2.5;
-				static constexpr auto minTrackPT_default = 0.3; // 300 MeV
-				// Loopers are not tracked: pT = 0.3 |q| B R (0.3 GeV per Tesla per elementary charge)
-				// assume B = 2 T and minR = .5 m, so 300 MeV is a good minimum
-							
-				double squareWidth; //!< @brief The angular width of calorimeter cells in the central belts
-				double etaMax_cal; //!< @brief The maximum pseudorapidity of the calorimeter.
-				double etaMax_track; //!< @brief The maximum pseudorapidity of the tracker.
-				double minTrackPT; //!< @brief The minimum pT of detectable tracks.
-				bool evenTowers; //!< @brief Create an even number of towers in each belt (so each tower at [eta, phi] has an antipodal tower at [-eta, -phi]).
+				~Settings() {}
+				
+				/*! @brief The phi width of calorimeter cells in the central belts
+				 * 
+				 *  Angles are read using kdp::ReadAngle (support for "deg" and "rad" suffix).
+				*/ 
+				Param<double> squareWidth = Param<double>("squareWidth", "5 deg");
+				
+				//! @brief The maximum pseudorapidity of the calorimeter.
+				Param<double> etaMax_cal = Param<double>("etaMax_cal", 5.);
+				
+				//! @brief The maximum pseudorapidity of the tracker.
+				Param<double> etaMax_track = Param<double>("etaMax_track", 2.5);
+				
+				/*! @brief The minimum \f$ p_T \f$ of charged particles which can be tracked
+				 *  
+				 *  Charged particles are deflected by the magnetic field, 
+				 *  creating helical tracks whose radius of curvature is proportional 
+				 *  to their transverse momentum. When \f$ p_T \f$ is too low, 
+				 *  the radius of curvature is so small that the charged particles
+				 *  don't traverse enough layers of tracker to be detected. 
+				 *  These "loopers" are not tracked. 
+				 *  
+				 *  The link between momentum and radius is  \f$ p_T = 0.3 |q| B R \f$ 
+				 *  (0.3 GeV per Tesla per elementary charge per meter in helical radius)
+				 *  Assuming B = 2 T and minR = .5 m, we get 300 MeV
+				*/  
+				Param<double> minTrackPT = Param<double>("minTrackPT", 0.3);
+				
+				//! @brief Force an even number of towers in each belt 
+				//!  (so each tower at [eta, phi] has an antipodal tower at [-eta, -phi]).
+				Param<bool> evenTowers = Param<bool>("evenTowers", false);
 		};
 		
-		//! @brief A simple struct for communicating tower edges.
+		//! @brief A simple struct for communicating tower edges (lower < upper by definition)
 		struct Edges {double eta_lower, eta_upper, phi_lower, phi_upper;};
 		
 		//! @brief Add energy to Edges to facilitate a LEGO plot.
@@ -136,9 +178,10 @@ class ArrogantDetector
 			double energy;
 			
 			RawTower(Edges&& edges, double const energy_in);
-				
+			
+			//! @brief Flip z-location, which makes eta values their additive inverse.
 			void FlipZ();
-		};
+		};		
 		
 		//////////////////////////////////////////////////////////////////
 		/*   _____                          _     _                       
@@ -149,22 +192,30 @@ class ArrogantDetector
 		 *                                                                	*/
 		//////////////////////////////////////////////////////////////////		
 		 
-		//! @brief Read the settings from the INI file and set up the detector.
-		ArrogantDetector(QSettings const& parsedINI, std::string const& detectorName = "detector");
+		/*! @brief Read the settings from the INI file and set up the detector.
+		 * 
+		 *  \param detectorName
+		 *  The name of the section (i.e. [section]) in the INI file which defines the detector's parameters
+		*/ 
+		ArrogantDetector(QSettings const& parsedINI, std::string const& detectorName = detectorName_default);
 		
 		virtual ~ArrogantDetector() {}
 		
-		/*! @brief Read "detectorName/type" and return a new detector 
-		 *  of that type (which the user is now responsible for cleaning up).
+		/*! @brief Read the settings in the INI file return a new detector
 		 * 
-		 *  We look for the following keywords in type
+		 *  The "type" of detector is specified by the key "type"
+		 * 
+		 *  We look for the following values in type
 		 *  "lep" -> ArrogantDetector_Lepton
-		 *  "had" -> ArrogantDetector_Hadron		 *  
+		 *  "had" -> ArrogantDetector_Hadron 
+		 * 
+		 *  \param detectorName
+		 *  The name of the section (i.e. [section]) in the INI file which defines the detector's parameters
 		*/ 
 		static ArrogantDetector* NewDetector(QSettings const& parsedINI, 
-			std::string const& detectorName = "detector");
+			std::string const& detectorName = detectorName_default);
 			
-		size_t NumTowers() const;
+		size_t NumTowers() const; //!< @brief The total number of towers in the calorimeter grid
 		
 		//////////////////////////////////////////////////////////////////
 		//////////////////////////////////////////////////////////////////
@@ -177,7 +228,7 @@ class ArrogantDetector
 		
 		/*! @brief Fill the detector from the Pythia event.
 		 * 
-		 *  The ME() vector is filled using Pythia status code +/- 23. 
+		 *  The ME() (matrix element) vector is filled using Pythia status code +/- 23. 
 		 *  Final state particles are split into neutral, charged and invisible and 
 		 *  sent to the other operator().
 		*/ 
@@ -244,15 +295,26 @@ class ArrogantDetector
 		 *  \warning Depending on how AddMissingE is configured, 
 		 *  the last tower may be the missing energy.
 		*/
-		inline std::vector<Tower> const& Towers() const {return towers;}
+		inline std::vector<vec3_t> const& Towers() const {return towers;}
+		
+		/*! @brief Apply a longitudinal boost to all detected particles,
+		 *  then return a normalized DetectorObservation
+		 * 
+		 *  The surfaceFraction returned for each tower is determined by 
+		 *  asking where the tower WOULD HAVE fallen had the event 
+		 *  been detected in the boosted frame.
+		*/ 
+		DetectorObservation GetObservation(double const beta_longitudenalBoost = 0.) const;
 		
 		inline Settings const& GetSettings() const {return settings;}
 		
-		//! @brief Return the edges of every tower, with fractional area stored in energy.
+		/*! @brief Return the edges of every tower in the calorimeter grid, 
+		 *  with their surfaceFraction stored in RawTower::energy.
+		*/ 
 		std::vector<RawTower> GetAllTowers() const;
 		
-		//! @brief Return all visible energy in calorimeter towers (via edges)
-		std::vector<RawTower> AllVisible_InTowers();		
+		//! @brief Bin all visible energy in calorimeter towers; useful for LEGO plots.
+		std::vector<RawTower> AllVisible_InTowers() const;	
 		
 		//////////////////////////////////////////////////////////////////
 		//////////////////////////////////////////////////////////////////
@@ -269,6 +331,9 @@ class ArrogantDetector
 		
 		//! @ingroup etaTheta
 		static double Theta_to_Eta(double const theta) {return std::asinh(std::tan(theta));}
+		
+		//! @brief The absolute tangent of the equatorial angle
+		static double AbsTanTheta(vec3_t const& p3) {return std::fabs(p3.x3)/p3.T().Mag();}
 		
 	protected:
 		//////////////////////////////////////////////////////////////////
@@ -287,7 +352,7 @@ class ArrogantDetector
 		*/
 		typedef uint64_t towerID_t;
 				
-		/*! @brief The maximum number of phi bins in each equatorial belt.
+		/*! @brief The maximum number of phi bins in each belt of towers.
 		 * 
 		 *  To balance the number of belts with the number of phiBins, 
 		 *  we use the square root of the number of unique IDs.
@@ -295,7 +360,8 @@ class ArrogantDetector
 		static constexpr towerID_t maxTowersPerBelt = 
 			(towerID_t(1) << (std::numeric_limits<towerID_t>::digits / 2));
 			
-		//! @brief A class to ensure that deltaPhi is is correctly mapped to the unit circle
+		//! @brief A class to ensure that deltaPhi is is correctly mapped to
+		//! an integer number of phi bins circumscribing the circle
 		class PhiSpec
 		{
 			private:
@@ -303,6 +369,13 @@ class ArrogantDetector
 				towerID_t numTowers;
 				
 			public:
+				/*! @brief Takes a deltaPhi_target and rounds it to perfectly fill
+				 *  360 degrees with an integer number of towers. 
+				 * 
+				 *  deltaPhi < 2 Pi (i.e., there is always at least one tower)
+				 * 
+				 *  if forceEven == true, an even number of towers are forced
+				*/ 
 				PhiSpec(double const deltaPhi_target, bool forceEven = false);
 			
 				double DeltaPhi() const {return deltaPhi;}
@@ -318,13 +391,13 @@ class ArrogantDetector
 			
 		/*! @brief The eta boundaries of calorimeter belts. Filled by the derived ctor.
 		 * 
-		 *  \warning The derived ctor \em SHALL fill only the lower edges.
+		 *  \warning The derived ctor \em SHALL fill all edges.
 		*/
 		std::vector<double> beltEdges_eta;
 		
-		/*! @brief The width/number of the phi bins in each equatorial calorimeter belt.
+		/*! @brief The width/number of the phi bins in each calorimeter belt.
 		 * 
-		 *  @param beltIndex The index of the equatorial calorimeter belt
+		 *  @param beltIndex The index of the calorimeter belt
 		*/
 		virtual PhiSpec const& DeltaPhi(towerID_t const beltIndex) const = 0;
 		
@@ -337,7 +410,8 @@ class ArrogantDetector
 		
 		/*! @brief Initalize the calorimeter from beltEdges_eta and DeltaPhi().
 		 * 
-		 *  This must be called AFTER the derived ctor has filled beltEdges_eta.
+		 *  \warning The derived ctor \em SHALL fill call this function 
+		 *  \em AFTER filling beltEdges_eta.
 		*/
 		void Init_inDerivedCTOR();
 		
@@ -345,16 +419,18 @@ class ArrogantDetector
 		//////////////////////////////////////////////////////////////////
 		// Derived class has access to these so it can redefine missingE scheme
 		
-		// The particles for the last detected event
-		std::vector<Pythia8::Particle> me; // matrix element, read from Pythia file
-		std::vector<vec4_t> finalState; // all final state particles
-		std::vector<vec3_t> tracks, tracks_PU; // visible charged particles
-		std::vector<Tower> towers; // calorimeter towers
+		std::vector<Pythia8::Particle> me; //!< @brief The matrix element, read from Pythia file
+		std::vector<vec4_t> finalState; //!< @brief All final state particles
+		std::vector<vec3_t> tracks; //!< @brief Visible charged particles
+		std::vector<vec3_t> tracks_PU; //!< @brief Visible charged pileup
+		std::vector<vec3_t> towers; //!< @brief Calorimeter towers
+		std::vector<double> towerAreas; //!< @brief The surface tower fractions
 		
 		// Running sums while filling the detector
-		vec3_t visibleP3; // 3-momentum sum of reconstructed (massless) particles
-		vec4_t invisibleP4; // 4-momentum sum of invisible particles
-		double visibleE, pileupE; // visible energy & charged pileup E = \sum |p|
+		vec3_t visibleP3; //!< @brief 3-momentum sum of reconstructed (massless) particles
+		vec4_t invisibleP4; //!< @brief 4-momentum sum of invisible particles (truth-level info)
+		double visibleE; //!< @brief Visible energy
+		double pileupE; //!< @brief Charged pileup \f$ E = \sum |p| \f$
 		// keep visibleE and visibleP3 separate because charged tracks are seen via massless momentum, 
 		// which is slightly smaller than track energy (i.e. a sum of 4-vectors) 
 			
@@ -375,71 +451,69 @@ class ArrogantDetector
 		//////////////////////////////////////////////////////////////////////////////////////////////////////////////
 		
 		
-		/*! @brief The towerID, based upon a particle's coordinates in the forward detector.
+		/*! @brief Each tower in the calorimeter has a unique ID, based upon its location
 		 * 
-		 *  The calorimeter is segmented into equatorial belts formed from towers sharing 
+		 *  The calorimeter is segmented into belts formed from towers sharing 
 		 *  the same boundaries in equatorial angle (i.e. latitude), 
 		 *  but different boundaries in phi (i.e. longitude).
 		 *  Each tower has a unique ID that is a combination of it's 
 		 * 
-		 *  	- beltIndex: the index of its equatorial belt (index 0 starts at eta = 0)
-		 * 	- phiIndex: the index of the tower in the belt (index 0 starts at phi = -Pi)
+		 *   - \c beltIndex: the index of its calorimeter belt (index 0 starts at eta = 0)
+		 * 
+		 *   - \c phiIndex: the index of the tower in the belt (index 0 starts at phi = -Pi)
 		 * 
 		 *  We then calculate
 		 * 
-		 *  	towerID = beltIndex * maxTowersPerBelt + phiIndex.
+		 *  	ID = beltIndex * maxTowersPerBelt + phiIndex.
 		 * 
-		 *  Because maxTowersPerBelt is often much larger than the
-		 *  number of towers in the actual belts, many towerIDs do not map 
-		 *  to an actual tower. However, by using a large, static choice for 
-		 *  maxTowersPerBelt, the math can be vastly simplified.
-		 *  The validity of a towerID is checked by any function which
-		 *  uses phiIndex to look something up. 
+		 *  Because \ref maxTowersPerBelt is often much larger than the
+		 *  number of towers in the actual belts, many TowerID's do not map 
+		 *  to an actual tower. Nonetheless, using a large, static choice for 
+		 *  \ref maxTowersPerBelt vastly simplifies the math.
+		 *  The validity TowerID's are checked by many functions which use them.
 		 * 
-		 *  For simplicity, the same IDs map both the forward and back detector
-		 *  (since beltIndex = 0 starts at eta = 0), so we keep 
-		 *  separate detectors to delineate forward and backward particles.
-		 *  Hence, there is no belt straddling eta = 0; the equator
-		 *  separates the first belts in the forward and backward detectors.
+		 *  For simplicity, the same TowerID's map both 
+		 *  the forward (+z) and backward (-z) calorimeters
+		 *  (since \c beltIndex = 0 starts at \f$ \eta = 0 \f$), so we keep 
+		 *  separate calorimeters to delineate forward and backward particles.
+		 *  Hence, there is no belt centered at \f$ \eta = 0 \f$); 
+		 *  the equator separates the forward and backward detectors.
 		 * 
-		 *  To facilitate conversion between indices and towerID, we 
-		 *  use separate structs (TowerID and TowerIndices) to store each, 
+		 *  To facilitate conversion between indices and TowerID, 
+		 *  we use separate structs (TowerID and TowerIndices) to store each, 
 		 *  then add operators to allow implicit conversion like:
 		 *  	
 		 *  	towerID_t <--> TowerID <--> TowerIndices
 		 * 
-		 *  This scheme allows TowerID to be used directly as an index, 
-		 *  and also in a std::set or std::map by harnessing 
-		 *  operator< for towerID_t. What is NOT ALLOWED is a direct 
-		 *  conversion from TowerIndices to towerID_t, which is 
-		 *  somewhat ambiguous (are we getting the towerID or the beltIndex?).
-		 *  Hence, TowerIndices cannot be accidentally used as an index.
+		 *  This scheme allows TowerID to be used directly as an integer index,
+		 *  and also in a std::set or std::map, by coverting it to \ref towerID_t
+		 *  (e.g., to harness operator< for \ref towerID_t during set inerstion).
+		 *  This scheme \em forbids conversion from TowerIndices to \ref towerID_t in one step, 
+		 *  so that TowerIndices cannot be accidentally used as an index.
 		 */  
-		class TowerID;
+		struct TowerID
+		{
+			// We cannot extend towerID_t, because it is not a class.
+			// However, the towerID_t operator allows it to be used like a towerID_t.
+			towerID_t ID;
+			
+			TowerID(towerID_t const id):ID(id) {}
+			
+			operator towerID_t() const {return ID;}
+		};
 		
 		//! @brief Each tower is uniquely identified via two indices
 		struct TowerIndices
 		{
-			towerID_t beltIndex; // the index of its equatorial belt (index 0 starts at eta = 0)
-			towerID_t phiIndex; // the index of the tower within the belt (via phi)
+			towerID_t beltIndex; //!< @brief The index of the belt (index 0 starts at eta = 0)
+			towerID_t phiIndex; //!< @brief The index of the tower within the belt (via phi)
 			
-			TowerIndices(TowerID towerID); // Break a towerID into its component indices
+			TowerIndices(TowerID towerID); //!< @brief Break a towerID into its component indices
+			
 			TowerIndices(towerID_t const beltIndex_in, towerID_t const phiIndex_in):
 				beltIndex(beltIndex_in), phiIndex(phiIndex_in) {}
 			
-			operator TowerID() const; // Convert indices to their towerID
-		};
-		
-		// We cannot extend towerID_t, because it is not a class.
-		// However, the towerID_t operator allows it to be used like a towerID_t.
-		struct TowerID
-		{
-			towerID_t id;
-			
-			TowerID(towerID_t const id_in):id(id_in) {}
-			
-			//~ operator TowerIndices() const {return TowerIndices(id);} // compiler can see this ctor, get's confused if there's a redundant operator
-			operator towerID_t() const {return id;}
+			operator TowerID() const; //!< @brief Convert indices to their towerID
 		};
 	
 		/*! @brief The calorimeter is a map between TowerID and energy.
@@ -468,7 +542,7 @@ class ArrogantDetector
 		double tanThetaMax_cal; //!< @brief The maximum equatorial angle for calorimeter coverage.
 		double tanThetaMax_track; //!< @brief The maximum equatorial angle for tracker coverage.
 		
-		towerID_t numBelts; //!< @brief The number of equatorial belts in the calorimeter.
+		towerID_t numBelts; //!< @brief The number of belts in the calorimeter.
 		towerID_t tooBigID; //!< @brief One past the largest valid \p towerID.
 		
 		/*! @brief The prototype geometric center for each belt
@@ -481,8 +555,11 @@ class ArrogantDetector
 		*/ 
 		std::vector<vec3_t> towerPrototype;
 		
-		//!< @brief Every tower in a belt shares the same fractional area fA = Omega / (4 Pi)
-		std::vector<double> fractionalArea; 
+		//!< @brief Every tower in a belt shares the same surfaceFraction fA = Omega / (4 Pi)
+		std::vector<double> surfaceFraction;
+		
+		kdp::WelfordEstimate<double> meanArea;
+		bool equalArea;
 		
 		//!< @brief Used to ensure that Finalize() is called once per Clear().
 		bool finalized;
@@ -504,30 +581,31 @@ class ArrogantDetector
 		//////////////////////////////////////////////////////////////////
 		//////////////////////////////////////////////////////////////////
 		
-		//! @brief Get the equatorial index of the belt of towers
+		//! @brief Get the index of the belt of towers
 		towerID_t GetBeltIndex_AbsTanTheta(double const absTanTheta) const;
 		
 		//! @brief Get the phi index of the tower
 		towerID_t GetPhiIndex(double phi, towerID_t const beltIndex) const;
 		
-		//! @brief Given a particle's angular position, obtain its equatorial and phi indices
+		//! @brief Given a particle's angular position, obtain its indices
 		TowerIndices GetIndices_AbsTanTheta_Phi(double const absTanTheta, double const phi) const;
 			
 		//! @brief Given a tower's indices, calculate it's central phi position
 		double GetCentralPhi(TowerIndices const& indices) const;
 		
 		//! @brief Given a tower's ID, calculate it's geometric center
-		Tower GetTowerCenter(TowerIndices const& indices) const;
+		vec3_t GetTowerCenter(TowerIndices const& indices) const;
 		
 		//! @brief Return the location of the tower's edges in eta/phi 
 		Edges GetTowerEdges(TowerIndices const& indices) const;
 };
 
-/*! @brief An ArrogantDetector with constant deltaPhi and towers optimized for squareness.
+/*! @brief An ArrogantDetector with constant deltaPhi and towers optimized for "squareness".
  * 
  *  Coincidentally, requiring square towers essentially creates
- *  equatorial belts with a nearly constant width in 
- *  pseudorapidity \f$ \eta = {\tt arctanh}\left(\frac{p_L}{p}\right)\f$.
+ *  belts with a nearly constant width in pseudorapidity 
+ *  \f$ \eta = {\tt arctanh}\left(\frac{p_L}{p}\right)\f$, 
+ *  just like detectors at the LHC.
 */ 
 class ArrogantDetector_Hadron : public ArrogantDetector
 {
@@ -545,7 +623,7 @@ class ArrogantDetector_Hadron : public ArrogantDetector
 		virtual ~ArrogantDetector_Hadron() {}
 };
 
-/*! @brief An ArrogantDetector with equatorial belts of approximately constant deltaTheta, 
+/*! @brief An ArrogantDetector with belts of approximately constant deltaTheta, 
  *  optimized so that each tower has approximately the same solid angle.
  * 
  *  The lepton collider uses the equatorial angle \f$ \theta = \arctan\left(\frac{p_L}{p_T}\right)\f$.
@@ -579,5 +657,23 @@ class ArrogantDetector_EqualArea : public ArrogantDetector
 typedef ArrogantDetector_EqualArea ArrogantDetector_Lepton;
 
 GCC_IGNORE_POP
+
+//~ /*! @brief A tower object that stores 3-momentum and fractional solid angle (Omega / (4 pi))
+ //~ *  
+ //~ *  Fields are public, just like the vec3_t it contains (WAAH).
+//~ */
+//~ struct Tower
+//~ {
+	//~ using vec3_t = PowerJets::vec3_t;
+	//~ using real_t = PowerJets::real_t;
+		
+	//~ vec3_t p3; //!< @brief 3-momentum of massless tower
+	//~ real_t fOmega; //!< @brief fractional solid angle (Omega / (4 pi))
+	
+	//~ Tower(vec3_t const& p3_in, real_t const fOmega_in):
+		//~ p3(p3_in), fOmega(fOmega_in) {}
+	
+	//~ operator vec3_t() const {return p3;}
+//~ };
 
 #endif

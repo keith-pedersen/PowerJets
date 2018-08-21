@@ -1,27 +1,27 @@
 #ifndef N_JET_MODEL
 #define N_JET_MODEL
 
+// Copyright (C) 2018 by Keith Pedersen (Keith.David.Pedersen@gmail.com)
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "PowerJets.hpp"
 #include "RecursiveLegendre.hpp"
 #include "pqRand/pqRand.hpp"
-//~ #include "ArrogantDetector.hpp"
 #include <vector>
 #include <memory> // ShowerParticle
 #include "fastjet/PseudoJet.hh"
 #include "ShapeFunction.hpp"
 #include <QtCore/QSettings>
 
-//======================================================================
+#include <Pythia8/Pythia.h>
 
-// Homo sapiens
-//                      
-//      ()      5 - head:   and the way.
-//     /||\     4 - heart:  but you have the will
-//    / || \    3 - hands:  It will need maintenance;
-//     //\\     2 - heat:   you'll find your home.
-//    //  \\    1 - feet:   After some searching,
-
-//======================================================================
+/*! @file NjetModel.hpp
+ *  @brief Defines jet classes and a binary splitting tree to define jets
+ *  @author Copyright (C) 2018 Keith Pedersen (Keith.David.Pedersen@gmail.com, https://wwww.hepguy.com)
+*/
 
 /*! @brief A 4-momenta with a cached mass.
  * 
@@ -45,21 +45,24 @@ struct Jet
 	
 	Jet():p4(), mass(0) {}
 	
+	//! @brief Dummy boolean means don't zero-initialize the 4-momentum
 	explicit Jet(bool):p4(false) {}
 	
 	explicit Jet(vec4_t const& p4_in):
-		p4(p4_in), mass(p4.Length()) {}
+		p4(p4_in), mass(p4.Length()) {}	
 	
-	// This is the main ctor, which all others should call.	
+	//! @brief This is the main ctor, which all others should call.
 	explicit Jet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type);
 			
-	// The interface we expect to use from inside a Cython loop
+	//! @brief The interface we expect to use from inside a Cython loop
 	explicit Jet(real_t const x1, real_t const x2, real_t const x3, 
 		real_t const w0, kdp::Vec4from2 const w0type);
 		
 	Jet(fastjet::PseudoJet const& pj);
 	
-	//! @brief Rotate the z-axis to (sin(theta) cos(phi), sin(theta) sin(phi), cos(phi))
+	Jet(Pythia8::Particle const& particle);
+	
+	//! @brief Rotate about \p axis by \p angle (in radians)
 	template <class T>
 	static void Rotate(std::vector<T>& jetVec, vec3_t const& axis, real_t const angle)
 	{
@@ -72,15 +75,17 @@ struct Jet
 
 /*! @brief A 4-momenta with a shape (defined in its CM frame and boosted into the lab frame).
  * 
- *  At the moment the jet's shape is always isotropic,
+ *  ShapedJets are designed to be constructed from a tree of ShowerParticle's
+ *  
+ *  At the moment the jet's CM shape is always isotropic,
  *  but the interface allows more sophisticated (though azimuthally symmetric) shapes 
  *  without altering the API.
 */
 class ShapedJet : public Jet
 {
 	public:
-		//! @brief The address of the jet in the splitting tree.
-		std::vector<bool> address;
+		//! @brief The address of the jet in the ShowerParticle splitting tree.
+		std::vector<bool> address; // Why does the ShapedJet have an address? Shouldn't the ShowerParticle?
 		mutable h_Boost shape;
 		
 		using Jet::Rotate;		
@@ -89,7 +94,7 @@ class ShapedJet : public Jet
 		static constexpr size_t incrementSize = size_t(1) << 8; // 512, not too large, not too small
 		using incrementArray_t = std::array<real_t, incrementSize>;
 		
-		// We assume that all shape parameters will be passed from a std::vector<real_t>
+		//! @brief The container to pass parameters defining non-isotropic shapes
 		using param_iter_t = std::vector<real_t>::const_iterator;
 		
 			GCC_IGNORE_PUSH(-Wunused-parameter)
@@ -119,7 +124,7 @@ class ShapedJet : public Jet
 		
 		~ShapedJet() {}
 				
-		// The don't initialize constructor
+		//! @brief The don't initialize constructor
 		explicit ShapedJet(bool): Jet(false), shape(p4.p(), real_t(1)) {}
 		
 			GCC_IGNORE_PUSH(-Wunused-parameter)
@@ -130,7 +135,7 @@ class ShapedJet : public Jet
 		address(std::move(address_in)),
 		shape(p4.p(), mass) {}
 				
-		// The interface we expect to use from inside a Cython loop
+		//! @brief The interface we expect to use from inside a Cython loop
 		ShapedJet(real_t const x1, real_t const x2, real_t const x3, 
 			real_t const w0, kdp::Vec4from2 const w0type, 
 			std::vector<bool> address_in = std::vector<bool>(),
@@ -144,7 +149,7 @@ class ShapedJet : public Jet
 		// after the jet's 4-vector and mass have been defined.
 		void SetShape(param_iter_t const shapeParam_begin, param_iter_t const shapeParam_end);
 		
-		std::vector<real_t> OnAxis(size_t const lMax) const {return shape.hl_Vec(lMax);}
+		//~ std::vector<real_t> OnAxis(size_t const lMax) const {return shape.hl_Vec(lMax);}
 		
 		// cython does not support
 		//~ static bool Sort_by_Mass(ShapedJet const& left, ShapedJet const& right)
@@ -152,15 +157,14 @@ class ShapedJet : public Jet
 			//~ return left.mass > right.mass;
 		//~ }
 		
+		//! @brief Sort ShapedJet's by their mass
 		bool operator < (ShapedJet const& that) const;
 };
 
 GCC_IGNORE_PUSH(-Wpadded)
 
-// This class is a C++ implementation of particleJet_mk3.py
-
 /*! @brief An extension of ShapedJet which manages a shower built from 
- *  mother particles splitting to two daughters (a -> bc).
+ *  mother particles splitting to two daughters (a -> b c).
  *  Each ShowerParticle is a node in a binary tree.
  * 
  *  The shower/splitting-tree will be determined by a list of parameters.

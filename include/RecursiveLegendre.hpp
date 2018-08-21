@@ -1,24 +1,25 @@
 #ifndef RECURSIVE_LEGENDRE
 #define RECURSIVE_LEGENDRE
 
-#include <type_traits>
+//~ #include <type_traits>
 #include <cmath>
 #include <cstddef>
 #include <assert.h>
+
+/*! @file RecurisveLegendre.hpp
+ *  @brief Defines two classes to recursively calculate Legendre polynomials at given z-values
+ *  @author Copyright (C) 2018 Keith Pedersen (Keith.David.Pedersen@gmail.com, https://wwww.hepguy.com)
+*/ 
 
 /*! @brief Recursively calculate the Legendre polynomial P_l for an array/vector of z values.
  * 
  *  \f$ (l+1)P_{l+1}(z) = (2l+1)z\,P_l(z) - l\,P_{l-1}(z) \f$
  * 
  *  Operating recursively on an array of values allows efficient auto-vectorization
- *  to SIMD instructions, with high cache-hit efficiency. As such,
- *  \p arraySize should be chosen to be some power-of-2 which is 
- *  large enough to span several cache lines.
- * 
- *  \note The non-virtual version is significantly smaller
+ *  to SIMD instructions on the CPU, with high cache-hit efficiency. 
  *  
- *  \tparam real_t 		the floating-point type used by P_l (a real-valued function)
- *  \tparam arraySize 		the size of the base array (could be any value, even 1, but powers of 2 [especially 32, 64, 128] work best).
+ *  \tparam T	
+ *  The container_t (a std::vector or a std::array)
 */
 template<class T>
 class RecursiveLegendre_Increment
@@ -51,7 +52,8 @@ class RecursiveLegendre_Increment
 		// since we know exactly how long each increment will be).
 		container_t Pl_A, Pl_B, Pl_C; // Pl_last, Pl_this and Pl_next will be stored here.
 			
-		size_t l_this; // The Legendre index l for Pl_this
+		size_t l_this; //!< @brief The Legendre index l for Pl_this
+		size_t size; //!< @brief The active size (in case there's lot's of unused space in z)
 		
 		void Fill(container_t& vec, real_t const val)
 		{
@@ -71,37 +73,61 @@ class RecursiveLegendre_Increment
 		/*! @brief The z-values for which P_l is calculated
 		 *  
 		 *  The public can access z so they are not forced to Setup()
-		 *  by passing z as an argument (e.g. if some f() takes z by reference to fill it).
+		 *  by passing z as an argument (e.g. if some function() takes z by reference to fill it).
 		 *  
 		 *  \warning The public must then call Reset() before calling Next(), 
-		 *  otherwise the results will be nonsense. 
+		 *  otherwise there will be undefined behavior.
 		*/ 
 		container_t z;
 		
-		//! @brief Initialize the object in a valid state.
+		//! @brief Initialize the object in a valid (though mostly useless) state.
 		RecursiveLegendre_Increment()
 		{
 			Fill(z, real_t(0));
-			Reset();
+			Reset(z.size());
 		}
 		
 		~RecursiveLegendre_Increment(){} // Suppress inlining failure warnings
 		
-		size_t l() {return l_this;} //!< @brief The current Legendre index l.
+		size_t l() const {return l_this;} //!< @brief The current Legendre index l.
 		
-		inline container_t const& P_lm2(){return *Pl_next;} //!< @brief \p P_{l-2}
-		inline container_t const& P_lm1(){return *Pl_last;} //!< @brief \p P_{l-1}
-		inline container_t const& P_l(){return *Pl_this;} //!< @brief \p P_l
+		size_t ActiveSize() const {return size;} //!< @brief The active size of all containers
 		
-		//! @brief Reset \ref z to \p z_new and \p l to 0.
-		void Setup(container_t const& z_new)
+		// The next time we call Next(), it will overwrite Pl_next,
+		// but until then it provides access to the second-to-last value
+		inline container_t const& P_lm2() const {return *Pl_next;} //!< @brief \f$ P_{l-2}(z) \f$
+		inline container_t const& P_lm1() const {return *Pl_last;} //!< @brief \f$ P_{l-1}(z) \f$
+		inline container_t const& P_l() const {return *Pl_this;} //!< @brief \f$ P_l(z) \f$
+		
+		/*! @brief Reset \ref z to \p z_new and \p l to 1.
+		 * 
+		 *  \param activeSize
+		 *  The active size of \p z_new (e.g. the indices which will actually be used).
+		 *  No index larger than activeSize will be altered during Next(), 
+		 *  and accessing \ref z, P_l(), P_lm1(), or P_lm2() outside of this range is undefined behavior.
+		 *  \throws Throws out_for_range if size > z_new.size()
+		*/ 
+		void Setup(container_t const& z_new, size_t const activeSize)
 		{
 			z = z_new;
-			Reset();
+			Reset(activeSize);
 		}
 		
-		//! @brief Reset \ref l_this to 1, but use the existing \ref z.
-		void Reset()
+		//! @brief Reset \ref z to \p z_new and \p l to 1.
+		void Setup(container_t const& z_new)
+		{
+			Setup(z_new, z_new.size());
+		}
+				
+		/*! @brief Reset \ref l_this to 1, but use the existing \ref z.
+		 * 
+		 *  \param activeSize
+		 *  The active size of \p z_new (e.g. the indices which will actually be used).
+		 *  No index larger than activeSize will be altered during Next(), 
+		 *  and accessing \ref z, P_l(), P_lm1(), or P_lm2() outside of this range is undefined behavior.
+		 *  \throws Throws out_for_range if size > z_new.size()
+		*/
+		void Reset(size_t const activeSize)
 		{			
 			Pl_last = &Pl_A;
 			Pl_this = &Pl_B; 
@@ -110,22 +136,26 @@ class RecursiveLegendre_Increment
 			// Start with l = 1
 			l_this = 1;
 			
-			Pl_last_coeff = -real_t(l_this); 		// (-l)
+			if(activeSize > z.size())
+				throw std::out_of_range("RecursiveLegendre_Increment: activeSize > z.size()");
+			size = activeSize;
+			
+			Pl_last_coeff = -real_t(l_this); 		// (-l), must put negative outside of real_t, because size_t
 			Pl_this_coeff = real_t(2*l_this + 1); 	// (2l + 1)
 			Pl_next_coeff = real_t(l_this + 1); 		// (l + 1)
 			
 			*Pl_this = z; // P_1(x) = z
 			
-			// FORMERALY IMPORTANT: before we begin, we MUST initialize Pl_last,
-			// even though Pl_last_coeff = 0 in the first iteration.
-			// This is because 0.*nan => nan, contamination all subsequent iterations.
-			// We do this every time we Reset(), in case the last z passed in a nan, 
-			// or if Pl_last was never initialized (so that it randomly contains a 
-			// numbers with the special nan exponent). 
-			// Of course, this does not protect against nan in the current z.
+			// Initialize the last values P_0(z) = 1
 			Fill(*Pl_last, real_t(1));
-			// Now that we've added access to P_lm2, fill Pl_next with NAN
+			// There is no second-to-last value, fill Pl_next with NAN
 			Fill(*Pl_next, real_t(NAN));
+		}
+		
+		//! @brief Reset \p l to 1, but use the existing \ref z.
+		void Reset()
+		{
+			Reset(z.size());
 		}
 		
 		//! @brief Increment \p l and return the \p P_l array.
@@ -135,7 +165,7 @@ class RecursiveLegendre_Increment
 			// smaller data type than the data type of the loop bound, 
 			// because it can't ensure that the loop will terminate 
 			// (from iterator overflow). Must use size_t.
-			for(size_t i = 0; i < z.size(); ++i)
+			for(size_t i = 0; i < size; ++i)
 			{
 				// To auto-vectorize a loop, don't try to mess with registers 
 				(*Pl_next)[i] = 
@@ -143,6 +173,7 @@ class RecursiveLegendre_Increment
 					+ Pl_last_coeff * (*Pl_last)[i])/Pl_next_coeff;
 			}
 			
+			// We use the P_l+1 recursion, so we post-increment l
 			++l_this;
 			Pl_next_coeff += real_t(1); // (l + 1)
 			Pl_this_coeff += real_t(2); // (2l + 1)
@@ -151,9 +182,7 @@ class RecursiveLegendre_Increment
 			{
 				// last = this
 				// this = next
-				// next = last
-				// The next time Next() is called, we overwrite next,
-				// but until then it provides access to the second-to-last value 
+				// next = last (now second-to-last value)				
 				
 				container_t* __restrict const Pl_secondLast = Pl_last;
 				Pl_last = Pl_this; // Pl_this -> Pl_last
@@ -165,7 +194,14 @@ class RecursiveLegendre_Increment
 		}
 };
 
-// In this case, it is better to repeat yourself and merely double-check the math
+/*! @brief Recursively calculate the Legendre polynomial P_l for a single z-value.
+ * 
+ *  \f$ (l+1)P_{l+1}(z) = (2l+1)z\,P_l(z) - l\,P_{l-1}(z) \f$
+ * 
+ *  
+ *  \tparam real_t
+ *  The floating-point type
+*/
 template<typename real_t>
 class RecursiveLegendre
 {
@@ -178,10 +214,10 @@ class RecursiveLegendre
 		// The "coeff" is the numerical pre-factor in the P_l recursion (e.g. (2l + 1))
 		real_t Pl_next_coeff, Pl_this_coeff, Pl_last_coeff;
 		
-		size_t l_this; // The Legendre index l for Pl_this
+		size_t l_this; //!< @brief The Legendre index l for Pl_this
 	
 	public:
-		real_t z;
+		real_t z; //!< @brief The z-value
 		
 		//! @brief Initialize the object in a valid state.
 		RecursiveLegendre()
@@ -192,9 +228,11 @@ class RecursiveLegendre
 		
 		size_t l() {return l_this;} //!< @brief The current Legendre index l.
 		
-		real_t const& P_lm2(){return Pl_next;} //!< @brief \p P_{l-2}
-		real_t const& P_lm1(){return Pl_last;} //!< @brief \p P_{l-1}
-		real_t const& P_l(){return Pl_this;} //!< @brief \p P_l
+		// The next time we call Next(), it will overwrite Pl_next,
+		// but until then it provides access to the second-to-last value
+		real_t const& P_lm2(){return Pl_next;} //!< @brief \f$ P_{l-2}(z) \f$
+		real_t const& P_lm1(){return Pl_last;} //!< @brief \f$ P_{l-1}(z) \f$
+		real_t const& P_l(){return Pl_this;} //!< @brief \f$ P_{l-2}(z) \f$
 		
 		//! @brief Reset \ref z to \p z_new and \p l to 0
 		void Setup(real_t const z_new)
@@ -203,7 +241,7 @@ class RecursiveLegendre
 			Reset();
 		}
 		
-		//! @brief Reset \ref l_this to 1, but use the existing \ref z.
+		//! @brief Reset \p l to 1, but use the existing \ref z.
 		void Reset()
 		{			
 			// Start with l = 0
@@ -215,15 +253,9 @@ class RecursiveLegendre
 			
 			Pl_this = z; // P_0(x) = 1
 			
-			// IMPORTANT: before we begin, we MUST initialize Pl_last,
-			// even though Pl_last_coeff = 0 in the first iteration.
-			// This is because 0.*nan => nan, contamination all subsequent iterations.
-			// We do this every time we Reset(), in case the last z passed in a nan, 
-			// or if Pl_last was never initialized (so that it randomly contains a 
-			// numbers with the special nan exponent). 
-			// Of course, this does not protect against nan in the current z.
+			// Initialize the last values P_0(z) = 1
 			Pl_last = real_t(1);
-			// Now that we've added access to P_lm2, set it to NAN
+			// There is no second-to-last value, fill Pl_next with NAN
 			Pl_next = NAN;
 		}
 		
@@ -240,9 +272,7 @@ class RecursiveLegendre
 			{
 				// last = this
 				// this = next
-				// next = last
-				// The next time Next() is called, we overwrite next,
-				// but until then it provides access to the second-to-last value 
+				// next = last (now second-to-last value)
 				
 				real_t const Pl_secondLast = Pl_last;
 				Pl_last = Pl_this; // Pl_this -> Pl_last

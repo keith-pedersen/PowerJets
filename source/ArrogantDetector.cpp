@@ -1,38 +1,55 @@
+// Copyright (C) 2018 by Keith Pedersen (Keith.David.Pedersen@gmail.com)
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "ArrogantDetector.hpp"
+#include "kdp/kdpVectors.hpp"
 #include <stdexcept>
-//~ #include <algorithm> // is_sorted, upper_bound
+#include <algorithm> // is_sorted, upper_bound
 #include <assert.h>
 
+////////////////////////////////////////////////////////////////////////
+// ArrogantDetector::Settings
 ////////////////////////////////////////////////////////////////////////
 
 ArrogantDetector::Settings::Settings(QSettings const& parsedINI, std::string const& detectorName)
 {
 	// Read in the requested squareWidth, which is the phi width of towers in the central band
-	squareWidth = kdp::ReadAngle<double>(parsedINI.value(
-		(detectorName + "/squareWidth").c_str(), squareWidth_default).toString().toStdString());
+	squareWidth = kdp::ReadAngle<double>(
+		squareWidth.ReadVariant(parsedINI, detectorName).toString().toStdString());
 		
-	evenTowers = parsedINI.value((detectorName + "/evenTowers").c_str(), true).toBool();
+	evenTowers.Read(parsedINI, detectorName);
 		
-	// Now round squareWidth to fit around the circle
-	squareWidth = PhiSpec(squareWidth, evenTowers).DeltaPhi();
+	try
+	{
+		// Now round squareWidth to fit around the circle
+		squareWidth = PhiSpec(squareWidth, evenTowers).DeltaPhi();
+	}
+	catch(std::domain_error e)
+	{
+		throw std::runtime_error("ArrogantDetector::Settings: squareWidth ("
+			+ std::to_string(squareWidth) + ") is too small.");
+	}
 	
-	etaMax_cal = Read_double(parsedINI, detectorName, "etaMax_cal", etaMax_cal_default);
-	etaMax_track = Read_double(parsedINI, detectorName, "etaMax_track", etaMax_track_default);
+	etaMax_cal.Read(parsedINI, detectorName);
+	etaMax_track.Read(parsedINI, detectorName);
 	
 	if(etaMax_track > etaMax_cal)
 		throw std::runtime_error("ArrogantDetector: cannot track beyond edge of calorimeter (i.e. must find etaMax_track <= etaMax_cal).");
 	
-	minTrackPT = Read_double(parsedINI, detectorName, "minTrackPT", minTrackPT_default);	
+	minTrackPT.Read(parsedINI, detectorName);
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-double ArrogantDetector::Settings::Read_double
-(QSettings const& parsedINI, std::string const& detectorName, 
-	std::string const& key, double const defaultVal)
-{
-	return parsedINI.value((detectorName + "/" + key).c_str(), defaultVal).toDouble();
-}
+//~ double ArrogantDetector::Settings::Read_double
+//~ (QSettings const& parsedINI, std::string const& detectorName, 
+	//~ std::string const& key, double const defaultVal)
+//~ {
+	//~ return parsedINI.value((detectorName + "/" + key).c_str(), defaultVal).toDouble();
+//~ }
 
 ////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////
@@ -44,6 +61,7 @@ ArrogantDetector::RawTower::RawTower(Edges&& edges, double const energy_in):
 	
 void ArrogantDetector::RawTower::FlipZ()
 {
+	// We must keep lower < upper when we make eta opposite
 	std::swap(eta_lower, eta_upper);
 	eta_lower = -eta_lower;
 	eta_upper = -eta_upper;
@@ -54,9 +72,20 @@ void ArrogantDetector::RawTower::FlipZ()
 
 ArrogantDetector::PhiSpec::PhiSpec(double const deltaPhi_target, bool forceEven)
 {
+	// forceEven tells us whether to double before or after rounding
 	double const numTowers_f = forceEven ? 
 		2.*std::max(1., std::round(M_PI / deltaPhi_target)) : 
 		std::max(1., std::round(2.*(M_PI / deltaPhi_target)));
+	
+	// The set of natural numbers which are contiguously representable 
+	// with floating point is [0, 2^P]. 
+	// Given C++ definition of epsilon, 2^P == 2 / epsilon
+	// We must ensure that numTowers_f is within this set, 
+	// otherwise we have a deltaPhi which is too small for exact rounding
+	// (and just too small in general; that's just too damn small)
+	if(numTowers_f > 2./std::numeric_limits<double>::epsilon())
+		throw std::domain_error("PhiSpec: deltaPhi_target (" 
+			+ std::to_string(deltaPhi_target) + ") is too small.");
 		
 	deltaPhi = 2.*(M_PI / numTowers_f);
 	numTowers = towerID_t(numTowers_f);
@@ -68,7 +97,7 @@ ArrogantDetector::PhiSpec::PhiSpec(double const deltaPhi_target, bool forceEven)
 ArrogantDetector::ArrogantDetector(QSettings const& parsedINI,
 	std::string const& detectorName):
 settings(parsedINI, detectorName), 
-numBelts(0), tooBigID(0), finalized(true) {}
+numBelts(0), tooBigID(0), equalArea(false), finalized(true) {}
 		
 ////////////////////////////////////////////////////////////////////////
 
@@ -95,17 +124,89 @@ size_t ArrogantDetector::NumTowers() const
 {
 	size_t numTowers = 0;
 	
+	// Add up all the towers in all the belts
 	for(size_t beltIndex = 0; beltIndex < numBelts; ++beltIndex)
 		numTowers += DeltaPhi(beltIndex).NumTowers();
 		
-	return 2*numTowers;
+	return 2*numTowers; // We counted forward detector, which the backward detector mirrors
+}
+
+///////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::DetectorObservation ArrogantDetector::GetObservation(double const beta_longitudenalBoost) const
+{
+	if(not finalized)
+		throw std::runtime_error("ArrogantDetector: detector not finalzed (you probably didn't mean to do this).");
+	
+															GCC_IGNORE_PUSH(-Wfloat-equal)
+	// If there is no boost, return the lab frame observation
+	if(beta_longitudenalBoost == 0.)
+		return DetectorObservation(tracks, towers, towerAreas);
+															GCC_IGNORE_POP
+															
+	// No "else" because return is obvious, and we want to limit scope of -Wfloat-equal ignore
+	DetectorObservation observation;
+	kdp::LorentzBoost<double> boost(vec3_t(0., 0., beta_longitudenalBoost));	
+	
+	// A PhatF will be constructed with a normalized pHat, and f = vec3.Mag();
+	// we will normalize after every particle is in place.
+	
+	for(auto const& track : tracks)
+		observation.tracks.emplace_back(boost.Forward(track));
+	
+	if(equalArea)
+		observation.towerAreas.push_back(meanArea.Mean());
+		
+	for(auto const& tower : towers)
+	{
+		vec3_t const boostedTower = boost.Forward(tower);
+		
+		observation.towers.emplace_back(boostedTower);
+				
+		if(not equalArea)
+		{
+			/* When we boost towers, we need to adjust their fractional area. 
+			 * If we boost the edges of the tower, it will no longer be square, 
+			 * and so a circular cap will no longer be a good approximation.
+			 * However, instead of boosting the detected objects, we can imagine
+			 * boosting the detector, and asking which part of the detector 
+			 * towers WOULD HAVE struck. Forward towers boosted backward 
+			 * would have struck a more central area, and been measured
+			 * with a CENTRAL angular resolution. Central towers boosted backwards
+			 * would have been measured with FORWARD angular resolution. 
+			 * 
+			 * This scheme makes sense in both tower schemes (equal-area and square).
+			 * In equal area, the fractional area is the same everywhere. 
+			 * But central towers boosted forward will bunch up, 
+			 * yet all with the same poor angular resolution, 
+			 * so they're like a larger, low-res tower.
+			 * In the square tower scheme, deltaPhi is the same in every belt, 
+			 * and deltaEta is constant for all belts. Thus, towers in adjacent 
+			 * eta belts will remain in adjacent eta belts, 
+			 * just as if we had measured them with a smaller angular resolution.
+			 */
+			
+			// throw a runtime_error if we fuck up the belt_index lookup
+			double const boosted_surfaceFraction = surfaceFraction.at(
+				// if the new belt is beyond the range of the detector, 
+				// use the angular resolution of the last belt
+				std::min(numBelts - 1,
+					GetBeltIndex_AbsTanTheta(ArrogantDetector::AbsTanTheta(boostedTower))));
+			
+			observation.towerAreas.push_back(boosted_surfaceFraction);
+		}
+	}
+	
+	observation.NormalizeF();
+	observation.CheckValidity_TowerArea();	
+	return observation;
 }
 
 ///////////////////////////////////////////////////////////////////////
 
 // This function makes a lot of assumptions about how things are supposed to be.
 // It assumes that the author of a derived class has read all the documentation
-// about the responsibilities of a derived class.
+// about the responsibilities of a derived class (which are not long).
 void ArrogantDetector::Init_inDerivedCTOR()
 {
 				GCC_IGNORE_PUSH(-Wfloat-equal)
@@ -116,10 +217,10 @@ void ArrogantDetector::Init_inDerivedCTOR()
 	if(beltEdges_eta.empty())
 		throw std::runtime_error("ArrogantDetector: No calorimeter possible with supplied parameters (or derived ctor did not setup).");
 	
-	// ... and should be in the correct format (lower edges, sorted, unique)
+	// ... and should be in the correct format (lower edges + last upper edge, sorted, unique)
 	// any other format is a bug that needs repairing 
 	// (i.e. the derived ctor should be passing only the correct format, 
-	//  and it has the discretion to issue a runtime_error if something doesn't make sense).
+	// and it has the discretion to issue a runtime_error if something doesn't make sense).
 	assert(beltEdges_eta.front() == 0.);
 	assert(std::is_sorted(beltEdges_eta.cbegin(), beltEdges_eta.cend()));
 	assert(std::adjacent_find(beltEdges_eta.begin(), beltEdges_eta.end()) == beltEdges_eta.end());
@@ -127,15 +228,14 @@ void ArrogantDetector::Init_inDerivedCTOR()
 		
 	/////////////////////////////////////////////////////////////////////
 	// The last beltEdge is the uper-bound on the last belt (etaMax_cal)
-	numBelts = beltEdges_eta.size() - 1;
+	numBelts = beltEdges_eta.size() - 1; // so the numBelts is one less than size
 	tooBigID = numBelts * maxTowersPerBelt;
 	
 	/////////////////////////////////////////////////////////////////////
 	// Sanity checks on etaMax, PhiWidth and NumPhiBins
 	assert(settings.etaMax_track <= settings.etaMax_cal); // Should be enforced by Settings ctor
 	
-	// The control logic is not designed to accommodate a beam hole,
-	// nor is such a detector even remotely possible.
+	// The control logic requires a beam hole; a detector without one is no remotely possible.
 	if(std::isinf(settings.etaMax_cal))
 		throw std::runtime_error("ArrogantDetector: etaBins MUST have a beam hole (use finalState for truth level information).");
 	
@@ -197,6 +297,7 @@ void ArrogantDetector::Init_inDerivedCTOR()
 	// Now for each belt, calculate the fractionalSolidAngle (same for each tower)
 	// and the prototype (phi=0) tower vec3 (simply rotate the
 	// transverse component to each tower's actual phi).
+	// Math worked out in TowerCenter.nb
 	double theta_lower = 0.;
 	
 	for(towerID_t belt_iPlus1 = 1; belt_iPlus1 < beltEdges_tanTheta.size(); ++belt_iPlus1)
@@ -206,11 +307,13 @@ void ArrogantDetector::Init_inDerivedCTOR()
 		{
 			double const deltaTheta = theta_upper - theta_lower;
 			double const thetaSum = theta_lower + theta_upper;
-			double const halfDeltaPhi = 0.5 * DeltaPhi(belt_iPlus1-1);
+			double const deltaPhi = DeltaPhi(belt_iPlus1-1);
 			
-			fractionalArea.emplace_back(halfDeltaPhi
-				* (std::cos(0.5 * thetaSum)
-				* std::sin(0.5 * deltaTheta)) / M_PI);
+			double const solidAngle = 2. * deltaPhi * 
+				(std::cos(0.5 * thetaSum) * std::sin(0.5 * deltaTheta));
+			
+			surfaceFraction.emplace_back(0.25*(solidAngle / M_PI));
+			meanArea += surfaceFraction.back();
 				
 			towerPrototype.emplace_back(false); // don't initialize
 			vec3_t& prototype = towerPrototype.back();
@@ -219,15 +322,26 @@ void ArrogantDetector::Init_inDerivedCTOR()
 		
 			/// Transverse term
 			prototype.x2 = prototype.x1 = 
-				std::sin(halfDeltaPhi) * 
+				std::sin(0.5 * deltaPhi) * 
 				(deltaTheta + std::cos(thetaSum)*sinDeltaTheta);
 			// Longitudinal term
-			prototype.x3 = halfDeltaPhi * sinDeltaTheta * std::sin(thetaSum);
+			prototype.x3 = 0.5 * deltaPhi * sinDeltaTheta * std::sin(thetaSum);
+			
+			// Normalize length (which is currently proportional to solid angle). 
+			// While Normalize() would better account for rounding errors, 
+			// until we multiply transverse term by {cos(phi), sin(phi)}, the vector is too long.
+			prototype /= solidAngle;
 		}
 		
 		theta_lower = theta_upper; // Move to next belt
 	}	
 			GCC_IGNORE_POP // -Wfloat-equal
+			
+	// Now determine if this is an equal area detector
+	if(std::sqrt(meanArea.Variance_Unbiased())/meanArea.Mean() < 1e-3)
+	{
+		equalArea = true;
+	}
 	
 	Clear();
 }
@@ -248,16 +362,15 @@ ArrogantDetector::TowerIndices::operator TowerID() const
 
 ArrogantDetector::towerID_t ArrogantDetector::GetBeltIndex_AbsTanTheta(double const absTanTheta) const
 {
-	// These are asserts because these angles are determined by ArrogantDetector (and derived classes)
-	// If they are wonky, we need to rewrite the detector code
-	assert(absTanTheta <= tanThetaMax_cal);
 	assert(absTanTheta >= 0.);
+	//~ assert(absTanTheta <= tanThetaMax_cal); // sometimes it will be out of bounds
 	
 	// upper_bound finds the first edge greater than, so we subtract one to get the lower edge
+	// if no edge is greater, it can't be detected, and we will return numBins
 	towerID_t const beltIndex = (std::upper_bound(beltEdges_tanTheta.begin(), 
 		beltEdges_tanTheta.end(), absTanTheta) - beltEdges_tanTheta.begin()) - 1;
 		
-	assert(beltIndex < numBelts);
+	//~ assert(beltIndex < numBelts); // sometimes it will be out of bounds
 	return beltIndex;
 }
 
@@ -302,14 +415,14 @@ double ArrogantDetector::GetCentralPhi(TowerIndices const& indices) const
 
 ////////////////////////////////////////////////////////////////////////
 
-Tower ArrogantDetector::GetTowerCenter(TowerIndices const& indices) const
+ArrogantDetector::vec3_t ArrogantDetector::GetTowerCenter(TowerIndices const& indices) const
 {
-	assert(indices.beltIndex < numBelts);		
-	Tower center(towerPrototype[indices.beltIndex], fractionalArea[indices.beltIndex]);
+	vec3_t center(towerPrototype.at(indices.beltIndex));
 		
 	double const phi = GetCentralPhi(indices); // This will check for valid phiIndex
-	center.p3.x1 *= std::cos(phi);
-	center.p3.x2 *= std::sin(phi);
+	// Rotate the prototype to the actual phi position
+	center.x1 *= std::cos(phi);
+	center.x2 *= std::sin(phi);
 	
 	return center;
 }
@@ -331,19 +444,19 @@ ArrogantDetector::Edges ArrogantDetector::GetTowerEdges(TowerIndices const& indi
 
 void ArrogantDetector::Clear()
 {
+	me.clear();
 	finalState.clear();
 	tracks.clear();
-	towers.clear();
 	tracks_PU.clear();
+	towers.clear();
+	towerAreas.clear();
 	
-	me.clear();
-	
-	foreCal.clear();
-	backCal.clear(); 
-		
 	visibleE = pileupE = 0.;
 	visibleP3 = vec3_t(0., 0., 0.);
 	invisibleP4 = vec4_t(0., 0., 0., 0.);
+	
+	foreCal.clear();
+	backCal.clear();	
 	
 	finalized = false;
 }
@@ -353,7 +466,7 @@ void ArrogantDetector::Clear()
 void ArrogantDetector::Finalize(bool const correctMisingE)
 {
 	if(finalized)
-		throw std::runtime_error("ArrogantDetector: Detector already finalized; undefined behavior.");
+		throw std::runtime_error("ArrogantDetector: Detector already finalized; you probably didn't mean to do this.");
 	
 	WriteCal(foreCal, false);
 		foreCal.clear();
@@ -431,8 +544,8 @@ void ArrogantDetector::PartialFill(std::vector<vec4_t> const& neutralVec,
 		if(pMag > energy*(1. + 1e-8)) // Add a little safety buffer for light-like particles
 			throw std::runtime_error("ArrogantDetector: Spacelike-particle: [" + 
 				std::to_string(energy) + ", " + std::to_string(pMag) + "]");
-		if(pMag > 0.) // Only particles that move are detected
-		// This check ensures that we can search for TowerID for neutral particles
+		if(pMag > 0.) // Only particles that move are detected;
+		// this ensures that we get a meaningful TowerID for neutral particles
 		{
 			// finalState is the vector of everything that came from the hard scatter
 			// (including neutrinos). We are not interested in pileup.
@@ -443,7 +556,7 @@ void ArrogantDetector::PartialFill(std::vector<vec4_t> const& neutralVec,
 				invisibleP4 += *itAll;
 			else // Everything else can potentially be seen in the detector
 			{
-				double const absTanTheta = std::fabs(p3.x3)/p3.T().Mag();
+				double const absTanTheta = AbsTanTheta(p3);
 				
 				if(absTanTheta < tanThetaMax_cal) // It's within the cal, the detector can see it
 				{
@@ -562,8 +675,15 @@ void ArrogantDetector::WriteCal(cal_t const& cal, bool const flipZ)
 	// Convert all towers to massless 3-vectors
 	for(auto itTower = cal.begin(); itTower not_eq cal.end(); ++itTower)
 	{
-		towers.push_back(GetTowerCenter(itTower->first)); // first == towerID
-		vec3_t& p3 = towers.back().p3;
+		{
+			TowerIndices twrIndices(itTower->first); // first == towerID
+			
+			towers.push_back(GetTowerCenter(twrIndices));
+			
+			if(not equalArea)
+				towerAreas.push_back(surfaceFraction.at(twrIndices.beltIndex));
+		}
+		vec3_t& p3 = towers.back();
 		
 		p3 *= itTower->second; // second == tower energy
 		
@@ -574,6 +694,9 @@ void ArrogantDetector::WriteCal(cal_t const& cal, bool const flipZ)
 		// Add the 3-momentum of the (massless) tower to the running sum
 		visibleP3 += p3;
 	}
+	
+	if(equalArea and towers.size())
+		towerAreas.assign(1, meanArea.Mean());
 }
 
 ////////////////////////////////////////////////////////////////////////F
@@ -581,23 +704,23 @@ void ArrogantDetector::WriteCal(cal_t const& cal, bool const flipZ)
 // TODO: This is probably not the correct approach to missing energy
 void ArrogantDetector::AddMissingE()
 {
-	auto const missingP3 = -visibleP3;
-	auto const discardedP3 = std::accumulate(tracks_PU.begin(), tracks_PU.end(), vec3_t());
+	// Discard all tracked pileup
+	for(vec3_t const& pileup : tracks_PU)
+	{
+		visibleP3 -= pileup;
+		visibleE -= pileup.Mag();
+	}
 	
-	auto const correctionP3 = missingP3 + discardedP3;
-	double const correctionE = correctionP3.Mag(); 
-	
-	// MET is treated as a tower, due to poor angular resolution.
-	// We also add a tower accounting for the pileup tracks which we discard
-	visibleE += (correctionE - pileupE);
-	
+	vec3_t const correctionP3 = -visibleP3;
+		
+	// MET is treated as a tower, due to poor angular resolution, 
+	// but it is not correct to simply add it as if it was detected.
+	// Instead, we spread it out proportional to each tower's fraction of the tower energy.
 	double const towerE = std::accumulate(towers.begin(), towers.end(), 0., 
-		[](double const sum, Tower const& tower){return sum + tower.p3.Mag();});
+		[](double const sum, vec3_t const& tower){return sum + tower.Mag();});
 	
-	// Add the correctoinP3 to towers, since they have poor angular resolution, 
-	// and do it proportional to each tower's fraction of the tower energy.
-	for(Tower& tower : towers)
-		tower.p3 += correctionP3 * (tower.p3.Mag() / towerE);	
+	for(vec3_t& tower : towers)
+		tower += correctionP3 * (tower.Mag() / towerE);
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -606,18 +729,20 @@ std::vector<ArrogantDetector::RawTower> ArrogantDetector::GetAllTowers() const
 {
 	std::vector<RawTower> allTowers;
 	
-	TowerIndices indices(0);
+	TowerIndices indices(0); // Create a set of dummy indices to reuse
 	towerID_t& beltIndex = indices.beltIndex;
 	towerID_t& phiIndex = indices.phiIndex;	
 		
 	for(beltIndex = 0; beltIndex < numBelts; ++beltIndex)
 	{
 		towerID_t const numTowers = DeltaPhi(beltIndex).NumTowers();
-		double const fA = fractionalArea[beltIndex];
+		double const fA = surfaceFraction[beltIndex];
 		
 		for(phiIndex = 0; phiIndex < numTowers; ++phiIndex)
 		{
 			allTowers.emplace_back(GetTowerEdges(indices), fA);
+			
+			// Now emplace the corresponding tower in the back detector
 			allTowers.emplace_back(allTowers.back());
 			allTowers.back().FlipZ();
 		}
@@ -626,9 +751,9 @@ std::vector<ArrogantDetector::RawTower> ArrogantDetector::GetAllTowers() const
 	return allTowers;
 }
 
-std::vector<ArrogantDetector::RawTower> ArrogantDetector::AllVisible_InTowers()
+std::vector<ArrogantDetector::RawTower> ArrogantDetector::AllVisible_InTowers() const
 {
-	foreCal.clear(); backCal.clear();
+	cal_t foreCal_tmp, backCal_tmp;
 	
 	std::vector<RawTower> visible;
 	
@@ -638,39 +763,41 @@ std::vector<ArrogantDetector::RawTower> ArrogantDetector::AllVisible_InTowers()
 			
 		for(auto const& p3 : particles)
 		{
-			double const absTanTheta = p3.T().Mag()/std::fabs(p3.x3);
+			double const absTanTheta = ArrogantDetector::AbsTanTheta(p3);
 			
-			(IsForward(p3) ? foreCal : backCal)
-				[GetIndices_AbsTanTheta_Phi(absTanTheta, p3.T().Phi())] += p3.Mag();
+			if(absTanTheta < tanThetaMax_cal)
+			{
+				(IsForward(p3) ? foreCal_tmp : backCal_tmp)
+					[GetIndices_AbsTanTheta_Phi(absTanTheta, p3.T().Phi())] += p3.Mag();
+			}
 		}
 	}
 	
-	for(auto itTower = foreCal.begin(); itTower not_eq foreCal.end(); ++itTower)
+	for(auto itTower = foreCal_tmp.begin(); itTower not_eq foreCal_tmp.end(); ++itTower)
 	{
 		TowerID const& towerID = itTower->first;
 		double const& energy = itTower->second;
 	
+		// Correct the energy to make the LEGO plot integratable
 		double const fractionalSolidAngle = 1.;
-			//~ fractionalArea(GetIndices_EtaPhi(towerID).first);
+			//~ surfaceFraction(GetIndices_EtaPhi(towerID).first);
 		
 		visible.push_back(RawTower{GetTowerEdges(towerID), energy / fractionalSolidAngle});
 	}
 	
-	for(auto itTower = backCal.begin(); itTower not_eq backCal.end(); ++itTower)
+	for(auto itTower = backCal_tmp.begin(); itTower not_eq backCal_tmp.end(); ++itTower)
 	{
 		TowerID const& towerID = itTower->first;
 		double const& energy = itTower->second;
-	
+		
+		// Correct the energy to make the LEGO plot integratables
 		double const fractionalSolidAngle = 1.;
-			//~ fractionalArea(GetIndices_EtaPhi(towerID).first);
+			//~ surfaceFraction(GetIndices_EtaPhi(towerID).first);
 			
 		visible.push_back(RawTower{GetTowerEdges(towerID), energy / fractionalSolidAngle});
 		visible.back().FlipZ();
 	}
 	
-	foreCal.clear();
-	backCal.clear();
-
 	return visible;
 }
 

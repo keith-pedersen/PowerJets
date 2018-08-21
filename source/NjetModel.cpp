@@ -1,3 +1,9 @@
+// Copyright (C) 2018 by Keith Pedersen (Keith.David.Pedersen@gmail.com)
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "NjetModel.hpp"
 #include "RecursiveLegendre.hpp"
 #include "pqRand/pqRand.hpp"
@@ -15,6 +21,11 @@ Jet(vec3_t(x1, x2, x3), w0, w0type) {}
 
 Jet::Jet(fastjet::PseudoJet const& pj):
 	Jet(pj.px(), pj.py(), pj.pz(), pj.E(), kdp::Vec4from2::Energy) {}
+	
+////////////////////////////////////////////////////////////////////////
+
+Jet::Jet(Pythia8::Particle const& particle):
+	Jet(particle.px(), particle.py(), particle.pz(), particle.m(), kdp::Vec4from2::Mass) {}
 
 ////////////////////////////////////////////////////////////////////////
 
@@ -305,6 +316,7 @@ ShapedJet(vec3_t(), real_t(1), kdp::Vec4from2::Mass),
 mother(nullptr), b(nullptr), c(nullptr),
 pol(), inexact(false)
 {
+	// TODO: angle parameters must come last
 	/* There are two formats for params
 	 * 
 	 * no orientation (2, 3, then 4 per splitting):
