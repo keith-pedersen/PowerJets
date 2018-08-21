@@ -6,6 +6,11 @@
 #include <fstream>
 #include <Qt/QtCore>
 
+/*! @file tester_ArrogantDetector.cpp
+ *  @brief This file tests the calorimeter grid defined by ArrogantDetector, 
+ *  outputting the generated towers to a file which can be plotted with Mathematica
+*/
+
 int main()
 {
 	QSettings settings("tester_ArrogantDetector.ini", QSettings::IniFormat);

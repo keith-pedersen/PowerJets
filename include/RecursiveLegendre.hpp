@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstddef>
 #include <assert.h>
+#include <type_traits>
+#include <stdexcept>
 
 /*! @file RecurisveLegendre.hpp
  *  @brief Defines two classes to recursively calculate Legendre polynomials at given z-values
