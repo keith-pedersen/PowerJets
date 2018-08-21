@@ -2,7 +2,7 @@
 // Adapted from PYTHIA main11.cc and main19.cc (licenced under the GNU GPL version 2)
 
 #include "LHE_Pythia_PowerJets.hpp"
-#include "SpectralPower.hpp"
+//~ #include "SpectralPower.hpp"
 #include "kdp/kdpTools.hpp"
 #include "kdp/kdpStdVectorMath.hpp"
 #include <fstream>
