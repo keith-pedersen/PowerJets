@@ -1,11 +1,8 @@
-# Set PQR_DIR to build pqrRand into your executable (using the %.x rule)
 PJ_DIR = ./lib
-#~ PQR_INC = $(PQR_DIR)/include
-
 LOCAL_DIR = $(HOME)/local
 
 CXX = gcc
-MARCH = corei7-avx
+MARCH = native
 STD = c++11 
 # GCC flags, including many useful warnings
 # (13.05.2018 @ 13:50) Options updated after reviewing the following GCC pages
@@ -16,7 +13,9 @@ STD = c++11
 # -pedantic-errors is like -Wpedantic, except the warnings become errors
 STABILITY_FLAGS = -pedantic-errors -fno-common -mfpmath=sse -mieee-fp #sse flag to avoid weird x87 registers (see https://gcc.gnu.org/wiki/FloatingPointMath)
 STABILITY_WARNINGS = -Wall -Wextra -W -Wconversion -Wshadow -Wpointer-arith -Wcast-qual -Wcast-align -Wwrite-strings -Wformat -Wmissing-declarations -Wredundant-decls -Wmissing-field-initializers -Wlogical-op -Wundef -Wfloat-equal -Wdouble-promotion -Wstrict-aliasing # -Wunsafe-loop-optimizations -Wuseless-cast
-PERFORMANCE_FLAGS = -O2 -march=$(MARCH) -msse4.2 -mavx2 -Winline -Wdisabled-optimization -Wpadded -ftree-vectorize -funsafe-loop-optimizations -Wvector-operation-performance # vectorize is the only thing from O3 that we want
+PERFORMANCE_FLAGS = -O2 -march=$(MARCH) -Winline -Wdisabled-optimization -Wpadded -ftree-vectorize -funsafe-loop-optimizations -Wvector-operation-performance # vectorize is the only thing from O3 that we want
+# Append processor dependent 
+PERFORMANCE_FLAGS += $(shell sh getSSE_AVX.sh)
 BUILD_LIB_FLAGS = -fPIC
 # 
 CXXFLAGS = -std=$(STD) $(STABILITY_WARNINGS) $(PERFORMANCE_FLAGS) $(BUILD_LIB_FLAGS) -g #-ftree-vectorizer-verbose=1 # -fopt-info-vec-optimized
