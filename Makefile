@@ -34,7 +34,7 @@ LIB_FLAGS = $(EXTERN_LIB_FLAGS) -L $(PJ_DIR) -lpJets
 EXAMPLES_CPP = $(wildcard examples/*.cpp)
 EXAMPLES_X = $(patsubst %.cpp, %.x, $(EXAMPLES_CPP))
 
-FILENAMES = PowerSpectrum ArrogantDetector SpectralPower NjetModel LHE_Pythia_PowerJets ShapeFunction 
+FILENAMES = PowerSpectrum ArrogantDetector NjetModel LHE_Pythia_PowerJets ShapeFunction 
 OBJS = $(addsuffix .o, $(addprefix $(SOURCE)/, $(FILENAMES)))
 
 all : lib $(EXAMPLES_X)
