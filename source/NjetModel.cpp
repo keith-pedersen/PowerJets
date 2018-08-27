@@ -12,6 +12,8 @@
 #include "kdp/kdpTools.hpp"
 
 ////////////////////////////////////////////////////////////////////////
+// Jet
+////////////////////////////////////////////////////////////////////////
 
 Jet::Jet(real_t const x1, real_t const x2, real_t const x3, 
 	real_t const w0, kdp::Vec4from2 const w0type):
@@ -56,6 +58,8 @@ p4(w0, p3_in, w0type) // This will catch invalid w0 and throw exceptions
 	}
 }
 
+////////////////////////////////////////////////////////////////////////
+// ShapedJet
 ////////////////////////////////////////////////////////////////////////
 
 void ShapedJet::SampleShape(incrementArray_t& z_lab, incrementArray_t& y_lab, 
@@ -113,6 +117,8 @@ void ShapedJet::SampleShape(incrementArray_t& z_lab, incrementArray_t& y_lab,
 	}
 }
 
+////////////////////////////////////////////////////////////////////////
+
 bool ShapedJet::operator<(ShapedJet const& that) const
 {
 	//~ return (this->p4.x0 > that.p4.x0);
@@ -121,6 +127,7 @@ bool ShapedJet::operator<(ShapedJet const& that) const
 }
 
 ////////////////////////////////////////////////////////////////////////
+// ShowerParticle
 ////////////////////////////////////////////////////////////////////////
 
 ShowerParticle::ShowerParticle(ShowerParticle* mother_in, 
@@ -132,6 +139,7 @@ b(nullptr), c(nullptr),
 pol(pol_in), inexact(false)
 {}
 
+////////////////////////////////////////////////////////////////////////
 
 std::vector<bool> ShowerParticle::DaughterAddress(bool const which) const
 {
@@ -148,46 +156,51 @@ void ShowerParticle::Split(param_iter_t const param_begin, param_iter_t param_en
 		
 	// We need at least 3 splitting parameters.  Get them last to first, 
 	// because an exception will be thrown by at(2) if there are not enough.
-	real_t const zStar = splittingParams.at(2);
-	real_t const ubFrac = splittingParams[1]; // We now know that size is at least 3
-	real_t const uSum = splittingParams[0];
+	real_t const z_star = splittingParams.at(2);
+	real_t const u_b_star = splittingParams[1]; // We now know that size is at least 3
+	real_t const u_bc = splittingParams[0];
 	
-	if((zStar > real_t(1)) or (zStar < real_t(0)))
-		throw std::domain_error("ShowerParticle::Split: zStar must be in the inclusive unit interval.");
-	if((ubFrac > real_t(1)) or (ubFrac < real_t(0)))
+	if((z_star > real_t(1)) or (z_star < real_t(0)))
+		throw std::domain_error("ShowerParticle::Split: z* must be in the inclusive unit interval.");
+	if((u_b_star > real_t(1)) or (u_b_star < real_t(0)))
 		throw std::domain_error("ShowerParticle::Split: u_b* must be in the inclusive unit interval.");
-	if((uSum > real_t(1)) or (uSum < real_t(0)))
-		throw std::domain_error("ShowerParticle::Split: u_sum must be in the inclusive unit interval.");		
-	
-	real_t const uDiff = (real_t(2) * ubFrac - real_t(1)) * uSum;
-					
+	if((u_bc > real_t(1)) or (u_bc < real_t(0)))
+		throw std::domain_error("ShowerParticle::Split: u_bc must be in the inclusive unit interval.");
+		
 	vec3_t const& p3_a = p4.p();
 	real_t const pSquared = p3_a.Mag2();
-	real_t const massSquared = kdp::Squared(mass);
+	/* The entire splitting scheme is oriented by the mother's direction of travel.'
+	 * If she is motionless (i.e., we're in her CM frame), then 
+	 * (i) z is fixed to one value and (ii) phi is meaningless,
+	 * because the back-to-back daughters have an undefined polarization vector. 
+	 * Indeed, how do we define k_T (the daughter momentum transverse to 
+	 * the mother's direction of travel). When we are in this situation, 
+	 * the z* / phi d.o.f. must be replaced by the axis of the back-to-back daughters.
+	 * We don't want two definitions of fitting parameters, 
+	 * so we make a motionless mother illegal. We will verify that 
+	 * the mother is moving here (from a previous splitting)  
+	 * and enforce motion in \ref MakeDaughters.
+	*/	 
+	assert(pSquared > real_t(0));
 	
 	// We find p3_b and the new polarization vector
 	vec3_t p3_b(p3_a);
-	vec3_t newPol(false);
+	real_t const uDiff = (real_t(2) * u_b_star - real_t(1)) * u_bc;
 	
-				GCC_IGNORE_PUSH(-Wfloat-equal)			
 	// Find how much of p3_b is parallel to p3_a
+	// This value (r) is described by Eq. 5.64 in my doctoral thesis.
 	{
-		// If pSquared == 0, then b = inf, and b * p() == nan 
-		// (even though we expect b * p() to be zero).
-		real_t const r = (pSquared == real_t(0)) ? real_t(0) : 
-			real_t(0.5)*(real_t(1) + uDiff * uSum + 
-			(real_t(2) * zStar - real_t(1)) * 
-			std::sqrt((massSquared + pSquared)/ pSquared * Delta2(uSum, uDiff)));
-		assert(Delta2(uSum, uDiff) >= real_t(0));
-		assert(not std::isnan(r));		
+		real_t const r = real_t(0.5)*(real_t(1) + uDiff * u_bc + 
+			(real_t(2) * z_star - real_t(1)) * 
+			std::sqrt((kdp::Squared(mass) + pSquared)/ pSquared * Delta2(u_bc, uDiff)));
+		assert(Delta2(u_bc, uDiff) >= real_t(0));
+		assert(not std::isnan(r));
 		
 		p3_b *= r;
 	}
-				GCC_IGNORE_POP
 	
-	// Inside this scope there are three calls to Normalize()
-	// The last two are crucial, the first one perhaps not so much.
-	// However, since we can only remove 1/3 of them, leave them all.
+	// Calculate newPol, then use it to calculate kT
+	vec3_t newPol(false);
 	{
 		// Get a's normalized direction of travel
 		vec3_t const p_hat = p3_a / std::sqrt(pSquared);
@@ -201,66 +214,61 @@ void ShowerParticle::Split(param_iter_t const param_begin, param_iter_t param_en
 			
 			// The polarization vector rotates by phi degrees.
 			// 	rotated = cos * original + sin * transverse
-			// To keep polarization consistent with the diagram in the thesis, 
+			// To keep polarization consistent with its definition,
 			// we obtain the transverse unit vector via (pHat x pol) [opposite the original code]
-			//~ vec3_t const kT_hat = pol.Cross(p_hat).Normalize();
 			vec3_t const kT_hat = p_hat.Cross(pol).Normalize();
 			// DO NOT silently enforce |phi| < pi/2 by forcing cos to be positive [as in the original code],
 			// let the fitting routine correct large angles after the fact
 			newPol = (pol * std::cos(phi) + kT_hat * std::sin(phi)).Normalize();
 		}
 		
-		real_t const kT_mag = std::sqrt(zStar * (real_t(1) - zStar) * 
-			kdp::Diff2(real_t(1), uSum) * kdp::Diff2(real_t(1), uDiff) * massSquared);
+		real_t const kT_mag = std::sqrt(z_star * (real_t(1) - z_star) * 
+			kdp::Diff2(real_t(1), u_bc) * kdp::Diff2(real_t(1), uDiff)) * mass;
 										
 		p3_b += p_hat.Cross(newPol).Normalize() * kT_mag;
 	}
 	
-	MakeDaughters(p3_b, ubFrac * uSum, uSum, newPol);
+	MakeDaughters(p3_b, u_b_star * u_bc, u_bc, newPol);
 }
 		
 ////////////////////////////////////////////////////////////////////////
 
 void ShowerParticle::MakeDaughters(vec3_t const& p3_b, 
-	real_t const u_b, real_t const uSum, vec3_t const& newPol)
+	real_t const u_b, real_t const u_bc, vec3_t const& newPol)
 {
 	b = new ShowerParticle(this, p3_b, u_b * mass, newPol, DaughterAddress(false));
 	
-	// Got a negative mass errors (machine epsilon subtraction error)
-	// when ubFrac = 1. This code will prevent future occurrences.
-	real_t u_c = uSum * mass - b->mass;
-	assert(u_c > -real_t(1e-15)*mass);
-	if(u_c < real_t(0))
-		u_c = real_t(0);
+	// I got a negative mass errors (machine epsilon subtraction error)
+	// when u_b_star = 1. This code will prevent future occurrences.
+	real_t mass_c = u_bc * mass - b->mass;
+	assert(mass_c > -real_t(1e-15)*mass); // Any rounding error should be small
+	if(mass_c < real_t(0))
+		mass_c = real_t(0);
 	
-	c = new ShowerParticle(this, p4.p() - p3_b, u_c, newPol, DaughterAddress(true));
+	c = new ShowerParticle(this, p4.p() - p3_b, mass_c, newPol, DaughterAddress(true));
 	
-	//~ b = std::shared_ptr<ShowerParticle>(new ShowerParticle(this, p3_b, u_b * mass, newPol));
-	//~ c = std::shared_ptr<ShowerParticle>(new ShowerParticle(this, p4.p() - p3_b, uSum * mass - b->mass, newPol));
+							GCC_IGNORE_PUSH(-Wfloat-equal)
+	if((b->p4.p().Mag2() == real_t(0)) or (c->p4.p().Mag2() == real_t(0)))
+		throw std::runtime_error("ShowerParticle::MakeDaughters: Motionless daughters are not allowed; "
+		 + std::string("perhaps restrict z* to [eps, 1-eps]"));
 	
-					GCC_IGNORE_PUSH(-Wfloat-equal)			
 	/* With floating point arithmetic, we can guarantee that
 	 * 	(larger - smaller) + smaller = larger
 	 * So because we defined p_c by subtraction, we can guarantee momentum conservation.
 	 * What we cannot guarantee is that energy is conserved, 
-	 * since we define the two daughters via their 3-momentum and mass, 
+	 * since we define the two daughters via their 3-momentum and mass
+	 * (so that there are no space-like daughters)
 	 * and these *should* add up to the original mass, but there is no guarantee
 	*/
 	inexact = (EnergyLoss_unsafe() not_eq real_t(0));
-					GCC_IGNORE_POP
-			
-	//~ printf("%.16e, %.16e\n", sum.x0, p4.x0);
-	//~ printf("%.16e\n", kdp::RelDiff(sum.x0, p4.x0));
-	//~ assert(kdp::AbsRelDiff(sum.x0, p4.x0) < 10.*std::numeric_limits<real_t>::epsilon());
-	// All 4-momentum worked out as it should
-	//~ printf("(%.16e, %.16e, %.16e, %.16e)\n", sum.x0, sum.x1, sum.x2, sum.x3);
-	//~ assert((p4 - sum).Length() < 10.*std::numeric_limits<real_t>::epsilon());
+							GCC_IGNORE_POP
 }
 
 ////////////////////////////////////////////////////////////////////////
 
 void ShowerParticle::AppendJets(std::vector<ShapedJet>& existing)
 {
+	// Only add final-state jets
 	if(isLeaf())
 		existing.push_back(*this);
 	else
@@ -272,9 +280,9 @@ void ShowerParticle::AppendJets(std::vector<ShapedJet>& existing)
 
 ////////////////////////////////////////////////////////////////////////
 
-ShowerParticle::real_t ShowerParticle::Delta2(real_t const uSum, real_t const uDiff)
+ShowerParticle::real_t ShowerParticle::Delta2(real_t const sum, real_t const diff)
 {
-	return kdp::Diff2(real_t(1), uSum)*kdp::Diff2(real_t(1), uDiff);
+	return kdp::Diff2(real_t(1), sum)*kdp::Diff2(real_t(1), diff);
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -309,168 +317,186 @@ ShowerParticle::address_error ShowerParticle::AddressAlreadySplit
 
 ////////////////////////////////////////////////////////////////////////
 
-ShowerParticle::ShowerParticle(std::vector<real_t> const& params, 
-	std::vector<std::vector<bool>> const& addresses, bool const orientation):
-// Build the root node in its CM frame with energy = 1
+ShowerParticle::ShowerParticle(std::vector<real_t> const& params_kinematic, 
+	std::vector<std::vector<bool>> const& addresses, 
+	std::vector<real_t> const& params_orientation):
+// Build the root node in its CM frame with mass = 1
 ShapedJet(vec3_t(), real_t(1), kdp::Vec4from2::Mass),
 mother(nullptr), b(nullptr), c(nullptr),
 pol(), inexact(false)
 {
-	// TODO: angle parameters must come last
-	/* There are two formats for params
-	 * 
-	 * no orientation (2, 3, then 4 per splitting):
-	 * 
-	 * 	params = {
-	 * 		u_sum, u_b*, 
-	 * 		u_sum, u_b*, z*,
-	 *       u_sum, u_b*, z*, phi,
-	 * 		etc}
-	 * 
-	 * orientation (4 params per splitting)
-	 * 	
-	 * 	params = {
-	 * 		u_sum, u_b*, theta', phi', 
-	 * 		u_sum, u_b*, z*, omega',
-	 *       u_sum, u_b*, z*, phi,
-	 * 		etc}
-	 * 
-	 * The first parameters never has an address because they must be the root.
-	 * The next bit of code sorts between these two options and acts accordingly. 
-	*/ 
-	
-	using vec3_t = ShowerParticle::vec3_t;
-	
-	// If we don't care about orientation, then the choice of
-	// original splitting axis and orientation is arbitrary (they must be perpendicular).
-	vec3_t dijetAxis(0., 0., 1.);
-	vec3_t dijetPol(1., 0., 0.);
-	
-	static constexpr size_t numRootParams = 2; // Num params to specify the root branching
-	static constexpr size_t numNextParams = 3; // Num params to specify the next branching
-	
-	if(orientation)
+	// Verify that parameters are in the correct format
 	{
-		// 4 parameters for every splitting, including the root splitting
-		if((4 * (addresses.size() + 1)) not_eq params.size())
-			throw std::runtime_error("ShowerParticle: Number of parameters supplied does not match number of addresses" +
-				std::string("(with orientation, 4 for every particle)."));
+		/* params_kinetic = {
+		 * 		u_bc, u_b*,            2 params for root node (no address required)
+		 * 		u_bc, u_b*, z*,        3 params for next splitting (using address[0])
+		 *       u_bc, u_b*, z*, phi,   4 params for all additional splittings
+		 * 		etc}
+		*/
 		
-		// omega defines the orientation of the first splitting plane
-		// either it's the 8th parameter or it's zero (because we don't split twice)
-		real_t const omega = bool(addresses.size()) ? params[7] : real_t(0);
-		
-		// We rotate z^ to some off-axis position, then rotate about this axis by omega
-		kdp::Rotate3<real_t> rot(dijetAxis, vec3_t(1., params[2], params[3], 
-			kdp::Vec3from::LengthThetaPhi), omega);
-		
-		rot(dijetAxis);
-		rot(dijetPol);
-	}
-	else
-	{
-		if((addresses.empty() and (params.size() not_eq numRootParams)) or 
-			(addresses.size() and (4 * addresses.size() - 1) not_eq (params.size() - numRootParams)))
-		{
-			throw std::runtime_error("ShowerParticle: Number of parameters supplied does not match number of addresses" +
-				std::string("(2 for the first particle, 3 for the second, 4 for all subsequent)."));
-		}
-	}
-	
-	using param_it = std::vector<real_t>::const_iterator;
-		
-	// For all branches after the root branching, store the first and last parameter iterator
-	std::vector<std::pair<param_it, param_it>> param_begin_end;
-	
-	if(addresses.size())
-	{
-		if(orientation)
-			param_begin_end.emplace_back(params.begin() + 4, 
-				params.begin() + 4 + numNextParams);
-		else
-			param_begin_end.emplace_back(params.begin() + numRootParams, 
-				params.begin() + numRootParams + numNextParams);
-		
-		for(size_t i = 1; i < addresses.size(); ++i)
-		{
-			auto first = param_begin_end.back().second;
-			if ((i == 1) and orientation) 
-				++first;
+		// 4 parameters per node, once orientation parameters are put back in
+		long int const num_params = (long int)(params_kinematic.size() + 
+			((params_kinematic.size() >= 5) ? 3 : // Add 3 d.o.f. if 5 or more params
+				((params_kinematic.size() >= 2) ? 2 : 0))); // Add 2 d.o.f. if 2 or more params
 				
-			param_begin_end.emplace_back(first, first + 4);
-		}
+		auto const numNodes = ldiv(num_params, 4);
+		
+		if(size_t(numNodes.quot) == 0)
+			throw std::runtime_error("ShowerParticle: params_kinematic must contain at least "
+			 + std::string("two parameters for the root node"));
+		
+		if(size_t(numNodes.rem) > 0)
+			throw std::runtime_error("ShowerParticle: params_kinematic does not match expectations "
+				+ std::string("(2 for the root splitting, 3 for the second splitting, 4 for all subsequent)."));
 				
-		// Verify that we've used all the parameters
-		assert(param_begin_end.size() == addresses.size());
-		
-		if(addresses.size() == 1)
-			assert(param_begin_end.back().second == (params.end() - (orientation ? 1 : 0)));
-		else
-			assert(param_begin_end.back().second == params.end());
-	}
+		if((size_t(numNodes.quot) - 1) not_eq addresses.size())
+			throw std::runtime_error("ShowerParticle: " + std::to_string(numNodes.quot)
+				+ " nodes specified in params_kinematic; there should be "
+				+ std::to_string(numNodes.quot-1) + " addresses (one for each non-root node).");
+	}				
 	
-	// The root splitting needs 2 parameters
-	if(params.size() >= numRootParams)
+	// Handle the root splitting
 	{
-		//~ splittingParams = std::vector<real_t>(params.cbegin(), 
-			//~ params.cbegin() + numRootParams);
-			
-		/* We treat the root splitting differently, to mantain the correct toplogy
-		 * (we want the top two partons on either side of the event).
-		 * 	f_{b/c} = 1/2 (1 +/- (u_b-u_c)(u_b+u_c))
-		 * and we want f_{b/c} > 1/3. Thus we want
-		 * 	u2 = (u_b - u_c)*(u_b + u_c)
-		 * 	|u2| < 1 / 3
-		 * Using u_sum = u_b + uc, we can solve for
-		 * 	u_{b/c} = 1/2(u_sum +/- u2 / u_sum)
-		 * which sets a limit on u_sum
-		 * 	u_sum^2 > u2
-		 * And this allows us to define
-		 * 	u_sum = sqrt(fabs(u2)) + u*_sum * (1 - sqrt(fabs(u2)))
-		 * 	0 <= u*_sum <= 1
-		*/ 
-		//~ real_t const u2 = splittingParams[0];
-		//~ real_t const uSumStar = splittingParams[1];
-		
-		//~ real_t const uSum_min = std::sqrt(std::fabs(u2));
-		//~ real_t const uSum = uSum_min + (real_t(1) - uSum_min)*uSumStar;
-		
-		//~ real_t const uDiff = (uSum == real_t(0)) ? real_t(0) : u2 / uSum;
-		
-		//~ MakeDaughters(vec3_t(0., 0., 0.5*std::sqrt(Delta2(uSum, uDiff))),
-			//~ real_t(0.5)*(uSum + uDiff), uSum, vec3_t(1., 0., 0.));
-		
-		real_t const uSum = params[0];
-		real_t const ubFrac = params[1];
-		real_t const uDiff = (real_t(2)*ubFrac - real_t(1))*uSum;
-		
-		//~ printf("%.16e, %.16e\n", uSum, uDiff);
-		
-		// The CM mommentum is 0.5*std::sqrt(Delta2(uSum, uDiff)) 
-		MakeDaughters(dijetAxis * 0.5 * std::sqrt(Delta2(uSum, uDiff)),
-			ubFrac * uSum, uSum, dijetPol);
-			
-		for(size_t i = 0; i < addresses.size(); ++i)
+		// Construct the axis and polarization of the root node
+		vec3_t dijetAxis(false); // The direction of travel of root daughter b
+		vec3_t dijetPol(false); // false = don't initialize
+	
+		if(params_orientation.size())
 		{
-			ShowerParticle& toSplit = LocateParticle(addresses[i]);
+			if(params_orientation.size() not_eq 3)
+				throw std::runtime_error("ShowerParticle: params_orientation should hold 3 or 0 parameters");
+			
+			real_t const theta = params_orientation[0];
+			real_t const phi = params_orientation[1];
+			real_t const omega = params_orientation[2];
+			
+			// The Rotate3 ctor with the least amount of math takes the axis, angle.
+			// We want the rotation that takes [0, 0, 1] to
+			// [sin(theta)cos(phi), sin(theta)sin(phi), cos(theta)]
+			// Crossing these two gets the rotation axis (which we then normalize)
+			// [-sin(theta)sin(phi), sin(theta)cos(phi), 0] -> [-sin(phi), cos(phi), 0]
+			real_t const sinTheta = std::sin(theta);
+			real_t const sinPhi = std::sin(phi);
+			real_t const cosPhi = std::cos(phi);
+			
+			// Construct the pre-rotated axis and rotation matrix
+			dijetAxis = vec3_t(cosPhi * sinTheta, sinPhi * sinTheta, std::cos(theta));
+			kdp::Rotate3<real_t> rotate(vec3_t(-sinPhi, cosPhi, 0), theta);
+
+			// Construct un-rotated polarization, then rotate
+			dijetPol = vec3_t(std::cos(omega), std::sin(omega), 0);
+			rotate(dijetPol);
+		}
+		else // Use arbitrary axis in lieu of supplied orientation
+		{
+			dijetAxis = vec3_t(0, 0, 1);
+			dijetPol =  vec3_t(1, 0, 0);
+		}
+	
+		// Construct the root splitting
+		{
+			real_t const u_bc = params_kinematic[0];
+			real_t const u_b_star = params_kinematic[1];
+			real_t const uDiff = (real_t(2)*u_b_star - real_t(1))*u_bc;
+			
+			// The CM mommentum is 0.5*std::sqrt(Delta2(u_bc, uDiff)) 
+			MakeDaughters(dijetAxis * 0.5 * std::sqrt(Delta2(u_bc, uDiff)),
+				u_b_star * u_bc, u_bc, dijetPol);
+		}
+	}	
+	
+	{
+		auto param_begin = params_kinematic.cbegin() + 2;
+		auto param_end = param_begin + 3;		
+		auto address_it = addresses.cbegin();
+		
+		while(address_it not_eq addresses.cend())
+		{
+			ShowerParticle& toSplit = LocateParticle(*address_it);
 				
 			if(toSplit.isBranch())
-				throw AddressAlreadySplit(addresses[i]);
+				throw AddressAlreadySplit(*address_it);
 			
-			toSplit.Split(param_begin_end[i].first, param_begin_end[i].second);
+			toSplit.Split(param_begin, param_end);
+		
+			param_begin = param_end;
+			param_end += 4;
+			++address_it;
 		}
+		assert(param_begin == params_kinematic.cend());
 	}
+	
+	/* We treat the root splitting differently, to mantain the correct toplogy
+	 * (we want the top two partons on either side of the event).
+	 * 	f_{b/c} = 1/2 (1 +/- (u_b-u_c)(u_b+u_c))
+	 * and we want f_{b/c} > 1/3. Thus we want
+	 * 	u2 = (u_b - u_c)*(u_b + u_c)
+	 * 	|u2| < 1 / 3
+	 * Using u_sum = u_b + uc, we can solve for
+	 * 	u_{b/c} = 1/2(u_sum +/- u2 / u_sum)
+	 * which sets a limit on u_sum
+	 * 	u_sum^2 > u2
+	 * And this allows us to define
+	 * 	u_sum = sqrt(fabs(u2)) + u*_sum * (1 - sqrt(fabs(u2)))
+	 * 	0 <= u*_sum <= 1
+	*/ 
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle ShowerParticle::FromParams_OrientationKinematic
+	(std::vector<real_t> const& params_orientationKinematic, 
+	std::vector<std::vector<bool>> const& addresses)
+{
+	if((params_orientationKinematic.size() >= 4) and 
+		(kdp::Remainder_PowerOfTwo<4>(params_orientationKinematic.size()) == 0))
+	{
+		if(params_orientationKinematic.size() == 4)
+			return ShowerParticle(
+				std::vector<real_t>(params_orientationKinematic.cbegin() + 2, 
+					params_orientationKinematic.cend()),
+				addresses, 
+				std::vector<real_t>(params_orientationKinematic.cbegin(), 
+					params_orientationKinematic.cbegin() + 2));
+		else
+			return ShowerParticle(
+				std::vector<real_t>(params_orientationKinematic.cbegin() + 3, 
+					params_orientationKinematic.cend()),
+				addresses, 
+				std::vector<real_t>(params_orientationKinematic.cbegin(), 
+					params_orientationKinematic.cbegin() + 3));
+	}
+	else return ShowerParticle(params_orientationKinematic, addresses);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+ShowerParticle::ShowerParticle(ShowerParticle&& orig):
+	ShapedJet(orig),
+	mother(orig.mother),
+	b(orig.b), c(orig.c),
+	pol(orig.pol),
+	splittingParams(std::move(orig.splittingParams)),
+	inexact(orig.inexact)
+{
+	orig.mother = orig.b = orig.c = nullptr;
+	orig.pol = vec3_t();
+	inexact = false;
 }
 
 ////////////////////////////////////////////////////////////////////////
 
 ShowerParticle& ShowerParticle::operator=(ShowerParticle&& orig)
 {
+	ShapedJet(*this) = orig;
 	std::swap(mother, orig.mother);
 	std::swap(b, orig.b);
 	std::swap(c, orig.c);
+	std::swap(pol, orig.pol);
+	splittingParams.swap(orig.splittingParams);
+	std::swap(inexact, orig.inexact);
 	return *this;
-}		
+}
 
 ////////////////////////////////////////////////////////////////////////
 
@@ -493,7 +519,7 @@ bool ShowerParticle::isBranch()
 
 bool ShowerParticle::isShowerInexact()
 {
-	if(isLeaf()) // A leaf cannot be inexact
+	if(isLeaf()) // Inexactness arises during splitting, so a leaf cannot be inexact
 		return false;
 	else
 	{
@@ -511,17 +537,15 @@ ShowerParticle& ShowerParticle::LocateParticle(std::vector<bool> const& theAddre
 	// Starting here, navigate down until we locate address
 	ShowerParticle* currentNode = this;
 	// The level is the index of the current bool
-	size_t level = 0; // Slower than an iterator, but more readible. This function is not what takes the time.
-	
-	while(level < theAddress.size())
+	auto level = theAddress.cbegin(); 
+		
+	while(level not_eq theAddress.cend())
 	{
 		// If currentNode is a leaf, we can't derefence b or c; this address makes no sense.
 		if(currentNode->isLeaf())
-			throw NoSuchAddress(theAddress, level);
+			throw NoSuchAddress(theAddress, level - theAddress.cbegin());
 		else
-			currentNode = theAddress[level++] ? currentNode->c : currentNode->b;
-			//~ currentNode = address[level++] ? currentNode->c.get() : currentNode->b.get();
-			// Since we are not going to delete currentNode, it is same to use pointers directly
+			currentNode = *(level++) ? currentNode->c : currentNode->b;
 	}
 	assert(currentNode->address == theAddress);
 	
@@ -550,15 +574,15 @@ ShowerParticle::real_t ShowerParticle::EnergyLoss()
 
 ////////////////////////////////////////////////////////////////////////
 
-ShowerParticle::vec4_t ShowerParticle::Total_p4()
-{
-	std::vector<vec4_t> p4_vec;
+//~ ShowerParticle::vec4_t ShowerParticle::Total_p4()
+//~ {
+	//~ std::vector<vec4_t> p4_vec;
 	
-	for(auto const& jet : GetJets()) // Convert jets to 4-vectors
-		p4_vec.push_back(jet.p4);
+	//~ for(auto const& jet : GetJets()) // Convert jets to 4-vectors
+		//~ p4_vec.push_back(jet.p4);
 		
-	return kdp::BinaryAccumulate_Destructive(p4_vec);
-}
+	//~ return kdp::BinaryAccumulate_Destructive(p4_vec);
+//~ }
 
 ////////////////////////////////////////////////////////////////////////
 

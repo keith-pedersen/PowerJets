@@ -75,7 +75,8 @@ struct Jet
 
 /*! @brief A 4-momenta with a shape (defined in its CM frame and boosted into the lab frame).
  * 
- *  ShapedJets are designed to be constructed from a tree of ShowerParticle's
+ *  ShapedJets are designed to be constructed from a tree of ShowerParticle's;
+ *  they are essentially ShowerParticle's stripped of their binary tree pointers.
  *  
  *  At the moment the jet's CM shape is always isotropic,
  *  but the interface allows more sophisticated (though azimuthally symmetric) shapes 
@@ -84,8 +85,13 @@ struct Jet
 class ShapedJet : public Jet
 {
 	public:
-		//! @brief The address of the jet in the ShowerParticle splitting tree.
-		std::vector<bool> address; // Why does the ShapedJet have an address? Shouldn't the ShowerParticle?
+		/*! @brief The address of the jet in the ShowerParticle splitting tree.
+		 * 
+		 *  The address is described by ShowerParticle. 
+		 *  It is kept in ShapedJet for simplicity of the Cython code, 
+		 *  but it really shouldn't exist in ShapedJet at all.
+		*/ 
+		std::vector<bool> address;
 		mutable h_Boost shape;
 		
 		using Jet::Rotate;		
@@ -125,7 +131,7 @@ class ShapedJet : public Jet
 		~ShapedJet() {}
 				
 		//! @brief The don't initialize constructor
-		explicit ShapedJet(bool): Jet(false), shape(p4.p(), real_t(1)) {}
+		explicit ShapedJet(bool): Jet(false), shape() {}
 		
 			GCC_IGNORE_PUSH(-Wunused-parameter)
 		ShapedJet(vec3_t const& p3_in, real_t const w0, kdp::Vec4from2 const w0type,
@@ -163,52 +169,86 @@ class ShapedJet : public Jet
 
 GCC_IGNORE_PUSH(-Wpadded)
 
-/*! @brief An extension of ShapedJet which manages a shower built from 
- *  mother particles splitting to two daughters (a -> b c).
+/*! @brief An extension of ShapedJet which manages a particle shower built from 
+ *  mother particles splitting to two daughters (\f$ a \to b \, c \f$).
  *  Each ShowerParticle is a node in a binary tree.
  * 
- *  The shower/splitting-tree will be determined by a list of parameters.
- *  When each mother is split, she has seom dimensionless energy f_a and mass q_a (both non-negative). 
- *  It's splitting is determined by 4 parameters (the 4 d.o.f for particle b, 
- *  with particle c defined by conservation of momentum).
+ *  \section params Splitting parameters
  * 
- * 	z (the splitting fraction 0 <= z <= 1; f_b = z * f_a, f_c = (1-z) * f_a)
- * 	u_b (b's [non-negative] mass fraction; q_b = u_b * q)
- * 	u_c (c's [non-negative] mass fraction; q_c = u_c * q)
- * 	phi (the rotation of the daughter's splitting-plane relative to the mother's splitting-plane)
+ *  When each mother is split, she has some energy \f$ E_a \f$  and mass \f$ m_a \f$ (both non-negative). 
+ *  The \em b-c splitting plane is defined by a polarization vector:
+ *  \f[ \hat{\epsilon} \equiv \frac{\hat{p}_b \times \hat{p}_c}{|\hat{p}_b \times \hat{p}_c|}\f]
+ *  The mother's splitting is determined by 4 parameters (the 4 d.o.f for particle \em b, 
+ *  with particle \em c defined by conservation of momentum):
+ *   
+ *   - \em z : the splitting fraction \f$ 0 \le z \le 1;\; E_b = z\, E_a,\; E_c = (1-z) E_a \f$
+ * 
+ *   - \f$ u_b \f$ : \em b's (non-negative) mass fraction; \f$ m_b = u_b\, m_a \f$
+ * 
+ *   - \f$ u_c \f$ : \em c's (non-negative) mass fraction; \f$ m_c = u_c\, m_a \f$
+ * 
+ *   - \f$ \phi \f$ : the angle of the active, right-handed rotation 
+ *     about the mother's direction of travel \f$ \hat{p}_a \f$ that takes the mother's polarization 
+ *     \f$ \hat{\epsilon}_a \f$ (which defined the splitting plane that spawned the mother)
+ *     to her daughters' polarization \f$ \hat{\epsilon}_{bc} \f$ (defining the \em b-c splitting plane).
  * 	
  *  There are a number of constraints which are needed for each splitting.
- *  The daughter mass must conserve energy
+ *  The daughters' total mass must conserve energy
  * 
- * 	u_b + u_c <= 1
+ * 	\f[ u_b + u_c \le 1 \f]
  * 
- *  Also, z cannot arbitrarily satisfy p^mu conservation;
- *  it must satisfy z- <= z <= z+
+ *  Also, \em z cannot arbitrarily satisfy \f$ p^\mu \f$ conservation;
+ *  it must satisfy  \f$ z_- \le z \le z_+ \f$, where:
  * 
- * 	z(+/-) = 1/2*[1 + (q_b**2 - q_a**2)] +/- beta_a * 
- * 		sqrt((1 + q_b + q_c)(1 + q_b - q_c)(1 - q_b + q_c)(1 - q_b - q_c))]
+ *  \f[z_\pm = \frac{1}{2}\left(1 + (q_b^2 - q_c^2) \pm \beta_a
+ *     \sqrt{(1  - (q_b + q_c)^2)(1 - (q_b - q_c)^2)}\right) \f]
  * 
  *  We expect that the shower parameters will be determined from a 
  *  non-linear minimization fit. In general, while it is easy to 
- *  set "bounds" on parameters (i.e. param_i must exist in some domain), 
+ *  set "bounds" on parameters (i.e. \c param_i must exist in some domain), 
  *  it is non-trivial to enforce constraints (i.e. some equality of inequality 
  *  which depends on multiple parameters must be satisfied).
  *  To avoid constraints, we can build the constraints into the fitting parameters
  *  (so that, if the constraints are non-linear, the non-linearity is 
- *  baked into the fit parameters). We choose the following fit parameters.
+ *  baked into the fit parameters). We choose the following fit parameters:
  * 
- *         domain      parameter
- * 	==============================================================================================
- * 	[0, 1]        | uSum = u_b + u_c 
- * 	[0, 1]        | uFrac ==> u_b = uFrac * uSum
- * 	[0, 1]        | zStar ==> z = z(-) + zStar * (z(+) - z(-))
- * 	[-pi/2, pi/2] | phi (no constraint needed, but |phi| > pi/2 is handled by (zStar => 1 - zStar))
+ *   - \f$ u_{bc} \equiv \frac{m_b + m_c}{m_a} \in [0,1] \f$
+ * 
+ *   - \f$ u_b^* \equiv \frac{m_b}{m_b + m_c} \in [0,1] \f$
+ * 
+ *   - \f$ z^* \equiv \frac{z - z_-}{z_+ - z_-} \in [0,1] \f$
+ * 
+ *   - \f$ \phi \in [-\pi/2, \pi/2] \f$ 
+ *     (no constraint needed, but \f$ |\phi| > \pi/2 \f$ is handled by \f$ z^* \to 1 - z^* \f$)
  * 
  *  This gives:
+ *  
+ *   - \f$ u_b = u_b^*\, u_{bc} \f$
+ *   - \f$ u_c = (1-u_b^*) u_{bc} \f$ 
+ *   - \f$ z = z_- + z^* \, (z^+ - z_-) \f$
  * 
- * 	u_b = uFrac * usum
- * 	u_c = (1-uFrac) * usum
- * 	z = z(-) + zStar * (z(+) - z(-))
+ *  Each node uses these four bounded d.o.f (see ShowerParticle 
+ *  for a discussion of the root node and the tree orientation).
+ * 
+ *  \section address Node address
+ * 
+ *  The binary tree is composed of nodes, but a node can be a branch or a leaf. 
+ *  A branch is a node that has already split; it cannot split again. 
+ *  Only leaves can be split, but a tree can have many leaves. 
+ *  Hence, specifying a new splitting takes more than the four kinematic parameters; 
+ *  we also need to identify which leaf is splitting. 
+ *  This is accomplished via the node "address".
+ *  For simplicity, the address is built from directions for 
+ *  navigating the tree (see \ref LocateParticle): 
+ * 
+ *   - \c false means "follow daughter b".
+ *   - \c true means "follow daughter c".
+ * 
+ *  All the directions to find a node, starting from the root node, 
+ *  are wrapped into a <tt> std::vector<bool> </tt>.
+ *  Hence, an empty vector is the address of the root node. 
+ *  Of course, just because an address can be written doesn't make it valid. 
+ *  For safety, \ref LocateParticle will throw an exception when an address is invalid.
 */
 class ShowerParticle : public ShapedJet
 {
@@ -222,11 +262,11 @@ class ShowerParticle : public ShapedJet
 		};
 	
 	private: 
-		ShowerParticle* mother; // Currently not used at all, but keep around for versatility
-		ShowerParticle* b; //! @brief Daughter b
-		ShowerParticle* c; //! @brief Daughter c
-		//~ std::shared_ptr<ShowerParticle> b; //! @brief Daughter b
-		//~ std::shared_ptr<ShowerParticle> c; //! @brief Daughter c
+		ShowerParticle* mother; //!< @brief Currently not used, but keep around for versatility
+		ShowerParticle* b; //!< @brief Daughter b
+		ShowerParticle* c; //!< @brief Daughter c
+		//~ std::shared_ptr<ShowerParticle> b; //!< @brief Daughter b
+		//~ std::shared_ptr<ShowerParticle> c; //!< @brief Daughter c
 		
 		// I originally switched to shared_ptr for b and c because Cython needs a 
 		// nullary constructor to do its automatic code.
@@ -239,8 +279,9 @@ class ShowerParticle : public ShapedJet
 		// declaring a move assignment which swaps the pointers.
 	
 		/*! @brief The polarization is a unit-vector orthogonal to the splitting plane.
-		 * 
-		 *  pol is a property of the daughters, not the mother which splits.
+		 *  
+		 *  \f[ \hat{\epsilon} \equiv \frac{\hat{p}_b \times \hat{p}_c}{|\hat{p}_b \times \hat{p}_c|}\f]
+		 *  \ref pol is a property of the daughters, not the mother which splits.
 		*/
 		vec3_t pol;
 		
@@ -250,18 +291,22 @@ class ShowerParticle : public ShapedJet
 		*/ 
 		std::vector<real_t> splittingParams;
 		
-		//! @brief A flag to record if energy is not exactly conserved after splitting.
+		/*! @brief A flag to record if energy is not exactly conserved during splitting.
+		 * 
+		 *  \note Momentum is conserved by construction of \ref MakeDaughters
+		*/ 
 		bool inexact;
 				
-		//! @brief A ShowerParticle by its \ref mother when she is instructed to Split().
+		//! @brief A ShowerParticle spawned by a \ref mother who was instructed to Split().
 		ShowerParticle(ShowerParticle* mother_in, 
 			vec3_t const& p3_in, real_t const mass_in, vec3_t const& pol_in, 
 			std::vector<bool>&& address_in);
 		
 		/*! @brief Split this particle using the splitting parameters in the range [begin, end).
 		 *  
-		 *  splitting parameters are assumed to be in this format (phi is optional)
-		 *      splittingParams = {uSum, ubFrac, zStar, [phi]}
+		 *  Splitting parameters are assumed to be in this format (phi is optional) \verbatim
+		    splittingParams = {u_bc, u_b_star, z_star, [phi]}
+		    \endverbatim
 		*/		
 		void Split(param_iter_t const param_begin, param_iter_t param_end);
 		
@@ -274,8 +319,9 @@ class ShowerParticle : public ShapedJet
 		 *  (but do nothing more extreme; no exceptions are thrown, no assertions are made).
 		*/ 
 		void MakeDaughters(vec3_t const& p3_b, 
-			real_t const u_b, real_t const uSum, vec3_t const& newPol);
-			
+			real_t const u_b, real_t const u_bc, vec3_t const& newPol);
+		
+		//! @brief The address of the daughter (\c false => b, \c true => c)
 		std::vector<bool> DaughterAddress(bool const which) const;
 		
 		/*! @brief Recursively append, to the existing vector,
@@ -287,7 +333,7 @@ class ShowerParticle : public ShapedJet
 		void AppendJets(std::vector<ShapedJet>& existing);
 		
 		//! @brief The CM frame momentum function.
-		static real_t Delta2(real_t const uSum, real_t const uDiff);
+		static real_t Delta2(real_t const sum, real_t const diff);
 		
 		//! @brief Convert an address (see LocateParticle) to a string.
 		static std::string AddressToString(std::vector<bool> const& address);
@@ -313,72 +359,169 @@ class ShowerParticle : public ShapedJet
 		}
 		
 	public:
+		//! @brief A nullary constructor for Cython
 		ShowerParticle(): mother(nullptr), b(nullptr), c(nullptr) {}
-		/*! @brief Build the shower. This is the root/original particle.
+		
+		/*! @brief Build a shower in the CM frame of this particle (the root particle). 
 		 * 
 		 *  The shower is constructed in the CM frame of the root,
-		 *  with a mass of exactly one (scale as necessary).
+		 *  with a mass of exactly one (scale energy as necessary).
 		 *  A boost can be applied to the shower later (if one is needed).
+		 *  Because the power spectrum is invariant to absolute orientation, 
+		 *  the three degrees of freedom defining the absolute orientation 
+		 *  are optional. We explain why in the next paragraph.
+		 * 
+		 *  Because the root node is defined in its CM frame,
+		 *  the two root daughters are back-to-back, which makes their 
+		 *  polarization vector (and hence polarization rotation angle) 
+		 *  ill-defined (i.e., any vector in the 
+		 *  orthogonal plane is orthogonal to both daughters).		 
+		 *  Additionally, since \f$ \beta_a = 0 \f$,
+		 *  \f$ z_+ = z_- \f$ and \f$ z^* \f$ is meaningless.
+		 *  Yet these two degrees of freedom do not disappear, 
+		 *  they merely transform into the two d.o.f. defining the 
+		 *  \em axis of the two original daughters.
+		 *  When one of these original daughter's splits, 
+		 *  their non-zero speed releases \f$ and z^* \f$, 
+		 *  but \f$ \phi \f$ remains ill-defined
+		 *  because there is no existing polarization vector.
+		 *  Thus, the absolute orientation of the splitting tree
+		 *  requires defining these three d.o.f.
+		 *  (two to define the root axis, and one to define the 
+		 *  polarization of the first splitting, via its azimuthal position 
+		 *  about the root axis).
+		 * 
+		 *  Recall that the power spectrum is invariant to absolute orientation, 
+		 *  so defining the three orientation d.o.f. may not be necessary. 
+		 *  Thus, we default to an arbitrary orientation of the root splitting:
+		 *  the root axis is the \em z axis,  with daughter \em b going in the 
+		    \f$ +\hat{z} \f$ direction, and the root polarization is the \em x axis.
+		 *  If the three optional orientation d.o.f. are supplied, 
+		 *  they record the following orientation variables:
 		 *  
-		 *  The root splitting occurs along the z-axis,
-		 *  with the initial polarization along the x-axis.
-		 *  A rotation can be applied to the shower later (if one is needed).
+		 *   - \f$ \theta_0 \f$: The polar angle of root daughter \em b
+		 *     (relative to the \f$ +\hat{z} \f$).
 		 * 
-		 *  Given this paradigm, the parameters \em must follow this format 
-		 *  	\p params = 
-		 * 		{uSum_0, ubFrac_0, 		<== 2 params for the root particle (splitting_0)
-		 * 		 uSum_1, ubFrac_1, zStar_1,		<== 3 params for splitting_1
-		 * 		 ...
-		 * 		 uSum_i, ubFrac_i, zStar_i, phi_i, ...}		<== 4 params for all other splittings
+		 *   - \f$ \phi_0 \f$: The right-handed azimuthal angle of root daughter \em b
+		 *     (relative to the \f$ +\hat{x} \f$).
+		 *   
+		 *   - \f$ \omega_0 \f$: The rotation of the root polarization 
+		 *     about the daughter \em b's axis. 
+		 *     The first two d.o.f. define an active, right-handed rotation which takes 
+		 *     \f$ (0,\, 0,\, 1) \f$ to 
+		 *     \f$ (\sin\theta_0 \cos\phi_0,\, \sin\theta_0 \sin\phi_0, \cos\theta_0)\f$, 
+		 *     with a post-rotation about the new axis of \f$ \omega_0 \f$. 
 		 * 
-		 *  The root particle needs no address, but all additional splittings do:
-		 *  	\p addresses = {addr_1, ..., addr_i, ...} 	
+		 *  If there is a second splitting, regardless of whether it is 
+		 *  root daughter \em b or \em c, it will use the root polarization
+		 *  with \f$ \phi = 0 \f$ (i.e., the plane of the second splitting 
+		 *  is defined by the root polarization, so \f$ \omega_0 \f$ orients this plane).
+		 * 
+		 *  Given this paradigm, the root splitting needs only two kinematic parameters, 
+		 *  and the second splitting only three kinematic parameters. 
+		 *  All additional nodes need the full four parameters.
+		 *  
+		 *  \param params_kinematic
+		 *  The params specifying a k-node tree, with either
+		 *  2 or 5 + 4(k-2) parameters
+		 *  \verbatim
+		    {u_bc_0, u_b_star_0,            [ 2 params for the root splitting ]
+		     u_bc_1, u_b_star_1, z_star_1,  [ 3 params for splitting 1 ]
+		     ...                          [ 4 params for all other splittings ]
+		     u_bc_{k-1}, u_b_star_{k-1}, z_star_{k-1}, phi_{k-1}}   
+		    \endverbatim
+		 *
+		 *  \param addresses 
+		 *  A vector of addresses to specify the location of all nodes after the root node
+		 *  (i.e. the root particle needs no address).
+		 * 
+		 *  \param params_orientation
+		 *  The three orientation parameters described above: \verbatim
+		    {theta_0, phi_0, omega_0}. \endverbatim
+		 *  This vector shall either be empty or contain exactly three parameters.
+		 * 
+		 *  \throw Throws \c std::invalid_argument if \p params_kinematic 
+		 *  does not have the correct length for a k-node tree.
+		 * 
+		 *  \throw Throws \c std::invalid_argument if \p addresses.size()
+		 *  is not k-1, given the k-node tree specified by \p params_kinematic.
+		 * 
+		 *  \throw Throws \c std::invalid_argument if \p params_orientation.size()
+		 *  is not zero or three.
 		*/ 
-		ShowerParticle(std::vector<real_t> const& params, 
-			std::vector<std::vector<bool>> const& addresses = {}, 
-			bool const orientation = false);
+		ShowerParticle(std::vector<real_t> const& params_kinematic, 
+			std::vector<std::vector<bool>> const& addresses = {},
+			std::vector<real_t> const& params_orientation = {});
 			
-		// Delete the copy assigment 
-		ShowerParticle& operator=(ShowerParticle const& orig) = delete;
-		ShowerParticle& operator=(ShowerParticle&& orig);
+		/*! @brief Build a shower in the CM frame of this particle (the root particle)
+		 *  using one long list of parameters.
+		 * 
+		 *  Like the main constructor, but with [orientation, kinematic] 
+		 *  parameters concatenated into the same list (orientation first).
+		 * 
+		 *  \note This function is less safe than the main constructor 
+		 *  because it must \em detect the presence of orientation parameters 
+		 *  and separate them out. It exists so that we can build a shower from 
+		 *  the single list of parameters used by \c scipy.optimize.least_squares.
+		 * 
+		 *  \note We detect the presence of orientation parameters \em only when 
+		 *  <tt> params_orientationKinematic.size() % 4 == 0 </tt>.
+		*/ 
+		ShowerParticle FromParams_OrientationKinematic(std::vector<real_t> const& params_orientationKinematic, 
+			std::vector<std::vector<bool>> const& addresses = {});
+			
+		/*! \defgroup OnlyMove 
+		 *  @brief Nodes cannot be copied, they can only be moved.
+		 * 
+		 *  This prevents dealing with shallow/deep copies and pointer sharing/deletion.
+		*/
+		
+		// We need a period after \ingroup, otherwise doxygen won't link them correctly
+		ShowerParticle(ShowerParticle const& orig) = delete; //!< \ingroup OnlyMove .
+		ShowerParticle& operator=(ShowerParticle const& orig) = delete; //!< \ingroup OnlyMove .
+		ShowerParticle(ShowerParticle&& orig); //!< \ingroup OnlyMove .
+		ShowerParticle& operator=(ShowerParticle&& orig); //!< \ingroup OnlyMove .
 		
 		//! @brief Recursively destroy this particle and all descendants.
 		~ShowerParticle();
 	
-		//! @brief In the shower tree, a branch has daughters (is has split).
+		//! @brief A "branch" in the shower tree has daughters (is has split).
 		bool isBranch();
 		
-		//! @brief In the shower tree, a leaf has no daughters (it has not split).
+		//! @brief A "leaf" in the shower tree has no daughters (it has not split).
+		//! This makes it a final-state particle.
 		inline bool isLeaf() {return not isBranch();}
 		
 		/*! @brief \p true if this particle's energy was not exactly conserved when it split
-		 *  (always \p false if isLeaf).
+		 *  (always \p false if \ref isLeaf).
 		*/  
 		inline bool isInexact() {return inexact;}
 		
-		//! @brief \p true if this particle, or any descendants, isInexact
+		//! @brief \p true if this particle, or any descendants, \ref isInexact
 		bool isShowerInexact();
 		
 		/*! @brief Locate a particle in the shower, given its address relative to this particle.
 		 *  
 		 *  Each \p bool in address instructs which way to descend into the shower
-		 *  (\p false = choose b-daughter, \p true = choose c-daughter).
+		 *  (\p false = follow b-daughter, \p true = follow c-daughter).
 		 * 
-		 * 	address = {}              ==> this particle
-		 *  	address = {False}         ==> this particle's b-daughter
-		 *  	address = {True}          ==> this particle's c-daughter
-		 * 	address = {True, False}   ==> the b-daughter of this particle's c-daughter		 
+		 *  \verbatim
+		    address = {}              ==> this particle
+		    address = {False}         ==> this particle's b-daughter
+		    address = {True}          ==> this particle's c-daughter
+		    address = {True, False}   ==> the b-daughter of this particle's c-daughter
+		    \endverbatim
 		*/		
 		ShowerParticle& LocateParticle(std::vector<bool> const& address);
 		
-		//! @brief From this particle, copy all final-state descendants as ShapedJets.
+		//! @brief Return the final-state (leaf) descendants of this particle as ShapedJets.
 		std::vector<ShapedJet> GetJets();
 		
 		//! @brief Return the energy lost when this particle split (0 if isLeaf).
 		real_t EnergyLoss();
 		
 		//! @brief Return the sum of 4-momenta for the jets returned by this->GetJets.
-		vec4_t Total_p4();
+		//~ vec4_t Total_p4();
 		
 		/*! @brief From this particle, descend into the shower and 
 		 *  add up the (absolute) energy lost by all splittings.
