@@ -420,20 +420,27 @@ class PowerSpectrum
 			public:
 				ShapedParticleContainer() {}
 			
-				//! @brief Create an ensemble of extensive jets, auto-normalized to their total energy
-				ShapedParticleContainer(std::vector<ShapedJet> const& jets);
-				
+				/*! @brief Create an ensemble of extensive jets
+				 * 
+				 *  If \p normalizeF, normalize the ensemble's energy fraction
+				*/ 
+				ShapedParticleContainer(std::vector<ShapedJet> const& jets,
+					bool const normalizeF = true);
+					
 				/*! @brief Emplace particles all sharing the same shape, 
 				 *  with auto-normalization to their total energy.
-				*/ 
-				ShapedParticleContainer(std::vector<vec3_t> const& particles, 
-					std::shared_ptr<ShapeFunction> const theirSharedShape = delta);
+				*/
+				template<class T> 
+				ShapedParticleContainer(std::vector<T> const& particles, 
+					std::shared_ptr<ShapeFunction> const& theirSharedShape = delta):
+				ShapedParticleContainer(VecPhatF(particles, true), theirSharedShape) // normalizeF = true
+				{}
 				
-				/*! @brief Emplace particles all sharing the same shape; 
-				 *  no normalization (verbatim copy).
+				/*! @brief Emplace particles all sharing the same shape, 
+				 *  with NO normalization (verbatim copy).
 				 */
 				ShapedParticleContainer(std::vector<PhatF> const& particles, 
-					std::shared_ptr<ShapeFunction> const theirSharedShape = delta);
+					std::shared_ptr<ShapeFunction> const& theirSharedShape = delta);
 					
 				// Note; to get move semantics for shapeVec, we must ask for them
 				ShapedParticleContainer(ShapedParticleContainer&&) = default;
@@ -441,11 +448,11 @@ class PowerSpectrum
 				
 				//! @brief Append a set of particles sharing the same shape
 				void append(std::vector<PhatF> const& tail, 
-					std::shared_ptr<ShapeFunction> const theirSharedShape = delta);
+					std::shared_ptr<ShapeFunction> const& theirSharedShape = delta);
 					
 				//! @brief Append a single particle
 				void emplace_back(PhatF const& pHatF, 
-					std::shared_ptr<ShapeFunction> const itsShape = delta);
+					std::shared_ptr<ShapeFunction> const& itsShape = delta);
 		};
 		
 		/*! \ingroup ParticleContainers
@@ -901,7 +908,7 @@ class PowerSpectrum
 		 *  \throws Throws \c runtime_error if \p hl_detectorFilter is shorter than \p lMax
 		*/ 
 		std::vector<real_t> Hl_Hybrid(size_t const lMax,
-			std::vector<ShapedJet> const& jets, 
+			ShapedParticleContainer const& jets, 
 			std::vector<real_t> const& hl_detector_Filter,
 			ShapedParticleContainer const& particles,
 			std::vector<real_t> const& Hl_Obs_in = std::vector<real_t>());

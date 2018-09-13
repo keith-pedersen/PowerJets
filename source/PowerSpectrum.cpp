@@ -221,11 +221,9 @@ const std::shared_ptr<ShapeFunction> PowerSpectrum::ShapedParticleContainer::del
 ////////////////////////////////////////////////////////////////////////
 
 PowerSpectrum::ShapedParticleContainer::ShapedParticleContainer
-	(std::vector<ShapedJet> const& jets):
-PhatFvec(VecPhatF(jets, true)) // normalizeF = true
+	(std::vector<ShapedJet> const& jets, bool const normalizeF):
+PhatFvec(VecPhatF(jets, normalizeF))
 {
-	// Assume that every jet has a unique boost, and therefore a unique shape. 
-	// Hence, we clone every one without worrying about duplicate shapes.
 	for(auto const& jet : jets)
 		shapeVec.emplace_back(jet.shape.Clone());
 }
@@ -233,16 +231,8 @@ PhatFvec(VecPhatF(jets, true)) // normalizeF = true
 ////////////////////////////////////////////////////////////////////////
 
 PowerSpectrum::ShapedParticleContainer::ShapedParticleContainer
-	(std::vector<vec3_t> const& particles, 
-	std::shared_ptr<ShapeFunction> const theirSharedShape):
-ShapedParticleContainer(VecPhatF(particles, true), // normalizeF = true
-	theirSharedShape) {}
-
-////////////////////////////////////////////////////////////////////////
-
-PowerSpectrum::ShapedParticleContainer::ShapedParticleContainer
 	(std::vector<PhatF> const& particles, 
-	std::shared_ptr<ShapeFunction> const theirSharedShape):
+	std::shared_ptr<ShapeFunction> const& theirSharedShape):
 PhatFvec()
 {
 	append(particles, theirSharedShape);
@@ -252,9 +242,10 @@ PhatFvec()
 
 void PowerSpectrum::ShapedParticleContainer::append
 	(std::vector<PhatF> const& tail, 
-	std::shared_ptr<ShapeFunction> const theirSharedShape)
+	std::shared_ptr<ShapeFunction> const& theirSharedShape)
 {
-	PhatFvec::reserve(size() + tail.size());
+	shapeVec.reserve(size() + tail.size());
+	PhatFvec::reserve(shapeVec.capacity());
 	
 	for(PhatF const& particle : tail)
 		PhatFvec::emplace_back(particle);
@@ -267,7 +258,7 @@ void PowerSpectrum::ShapedParticleContainer::append
 ////////////////////////////////////////////////////////////////////////
 
 void PowerSpectrum::ShapedParticleContainer::emplace_back(PhatF const& pHatF, 
-	std::shared_ptr<ShapeFunction> const itsShape)
+	std::shared_ptr<ShapeFunction> const& itsShape)
 {
 	PhatFvec::emplace_back(pHatF);
 	shapeVec.push_back(itsShape);
@@ -407,7 +398,36 @@ PowerSpectrum::real_t PowerSpectrum::DetectorObservation::SmearedDistance_TowerT
 PowerSpectrum::real_t PowerSpectrum::DetectorObservation::AngularResolution
 	(real_t const ff_fraction) const
 {
+	struct AngleWeight
+	{
+		real_t angle; 
+		real_t weight;
+		
+		//~ using iter_t = std::vector<AngleWeight>::iterator;
+		
+		AngleWeight() = default;
+		AngleWeight(real_t const angle_in, real_t const weight_in):
+			angle(angle_in), weight(weight_in) {}
+		
+		bool operator<(AngleWeight const& rhs) const
+		{
+			return (this->angle < rhs.angle);
+		}
+		
+		// Sort a vector whose head is sorted and tail in unsorted
+		static void ReSort(std::vector<AngleWeight>& headTail, size_t const n_sorted)
+		{
+			assert(n_sorted <= headTail.size());
+			std::sort(headTail.begin() + n_sorted, headTail.end());
+			
+			if(n_sorted > 0)
+				std::inplace_merge(headTail.begin(), headTail.begin() + n_sorted, headTail.end());
+		}
+	};	
+	
 	CheckValidity_TowerArea();
+	if(std::fabs(1. - this->fTotal()) > 1e-8)
+		printf("wtf: %.3e\n", std::fabs(1. - this->fTotal()));
 	
 	if(size() < 3)
 	{
@@ -418,11 +438,10 @@ PowerSpectrum::real_t PowerSpectrum::DetectorObservation::AngularResolution
 	}
 	else
 	{
-		using angle_weight = std::pair<real_t, real_t>;
-		
-		// Create a list of inter-particle angles and correlation weight = f_i * f_j
-		std::vector<angle_weight> angleVec;
 		std::vector<real_t> twrRadii;
+		
+		size_t reductions_trk = 0;
+		size_t reductions_twr = 0;		
 		
 		// Integrating \int_0^thetaR dOmega = 
 		// 2 pi (1-cos(thetaR)) = Omega ==> sin(thetaR/2)**2 = surfaceFraction
@@ -430,75 +449,124 @@ PowerSpectrum::real_t PowerSpectrum::DetectorObservation::AngularResolution
 			twrRadii.emplace_back(real_t(2)*std::asin(std::sqrt(surfaceFraction)));
 		
 		// If all towers share the same radii, simply copy that universal radii
-		// (this rote copying simplifeis the logic of the inner loop)
+		// (this rote copying simplifies the logic of the inner loop)
 		if(twrRadii.size() < towers.size())
 			twrRadii.assign(towers.size(), twrRadii.at(0));
 			
-		for(auto trk = tracks.cbegin(); trk not_eq tracks.cend(); ++trk)
+		// Create a list of inter-particle angles and correlation weight = f_i * f_j
+		std::vector<AngleWeight> angleVec;
+		angleVec.reserve(this->size());
+		size_t n_sorted = 0;
+		
+		// We expect that the angular resolution will be calculated by 
+		// N inter-particle angles (Ex(<f|f>) ~= 1/n, and Ex(f) = 1/n, 
+		// so n * f * f ~= <f|f>
+		// Even though we only store a fraction of the total inter-particle angles, 
+		// we know they are the smallest \p maxSize inter-particle angles
+		// because the only way you can evicted from the smallest list
+		// is if something is smaller than you.
+		for(size_t const angleVec_maxSize : {size_t(2. * ff_fraction * double(this->size())),
+			kdp::GaussSum(this->size() - 1)})
 		{
-			// We only calculate the lower-half of the symmetric inter-particle matrix
-			for(auto trk_other = tracks.cbegin(); trk_other not_eq trk; ++trk_other)
+			for(auto trk = tracks.cbegin(); trk not_eq tracks.cend(); ++trk)
 			{
-				angleVec.emplace_back(
-					// No smearing between tracks; assume very well measured
-					trk->pHat.InteriorAngle(trk_other->pHat),
-						trk->f * trk_other->f);
+				// We only calculate the lower-half of the symmetric inter-particle matrix
+				for(auto trk_other = tracks.cbegin(); trk_other not_eq trk; ++trk_other)
+				{
+					angleVec.emplace_back(
+						// No smearing between tracks; assume very well measured
+						trk->pHat.InteriorAngle(trk_other->pHat),
+							trk->f * trk_other->f);
+				}
+				
+				for(size_t twr_i = 0; twr_i < towers.size(); ++twr_i)
+				{
+					// We calculate the dimensionless smeared angle, then rescale it by the tower radius
+					angleVec.emplace_back(
+						twrRadii[twr_i] * SmearedDistance_TrackTower(
+							trk->pHat.InteriorAngle(towers[twr_i].pHat)/twrRadii[twr_i]),
+						trk->f * towers[twr_i].f);
+				}
+				
+				if(angleVec.size() > 2 * angleVec_maxSize)
+				{
+					++reductions_trk;
+					AngleWeight::ReSort(angleVec, n_sorted);
+					angleVec.resize(angleVec_maxSize);
+					n_sorted = angleVec_maxSize;
+				}
 			}
 			
 			for(size_t twr_i = 0; twr_i < towers.size(); ++twr_i)
 			{
-				// We calculate the dimensionless smeared angle, then rescale it by the tower radius
-				angleVec.emplace_back(
-					twrRadii[twr_i] * SmearedDistance_TrackTower(
-						trk->pHat.InteriorAngle(towers[twr_i].pHat)/twrRadii[twr_i]),
-					trk->f * towers[twr_i].f);
-			}
-		}
-		
-		for(size_t twr_i = 0; twr_i < towers.size(); ++twr_i)
-		{
-			// We only calculate the lower-half of the symmetric inter-particle matrix
-			for(size_t twr_j = 0; twr_j < twr_i; ++twr_j)
-			{
-				// For two towers, we use their shared radius
-				real_t const twoTowerRadius = std::hypot(twrRadii[twr_i], twrRadii[twr_j]);
+				// We only calculate the lower-half of the symmetric inter-particle matrix
+				for(size_t twr_j = 0; twr_j < twr_i; ++twr_j)
+				{
+					// For two towers, we use their shared radius
+					real_t const twoTowerRadius = std::hypot(twrRadii[twr_i], twrRadii[twr_j]);
+					
+					angleVec.emplace_back(
+						twoTowerRadius	* SmearedDistance_TowerTower(
+							towers[twr_i].pHat.InteriorAngle(towers[twr_j].pHat)/twoTowerRadius),
+						towers[twr_i].f * towers[twr_j].f);
+				}
 				
-				angleVec.emplace_back(
-					twoTowerRadius	* SmearedDistance_TowerTower(
-						towers[twr_i].pHat.InteriorAngle(towers[twr_j].pHat)/twoTowerRadius),
-					towers[twr_i].f * towers[twr_j].f);
+				if(angleVec.size() > 2 * angleVec_maxSize)
+				{
+					++reductions_twr;
+					AngleWeight::ReSort(angleVec, n_sorted);
+					angleVec.resize(angleVec_maxSize);
+					n_sorted = angleVec_maxSize;
+				}
 			}
+			// Now sort angles from smallest to largest; keeping the weight 
+			// properly attached to its corresponding angle is why we needed the struct
+			//~ std::sort(angleVec.begin(), angleVec.end());
+			// We only want to sort by angle (first), so we define a temporary lambda expression
+			//~ [](AngleWeight const& left, AngleWeight const& right)
+			//~ {return left.first < right.first;});
+			AngleWeight::ReSort(angleVec, n_sorted);			
+		
+			real_t weight = real_t(0);
+			/* Now we add up the smallest angles until their collective weight 
+			 * exceeds some weight target (as a function of <f|f>, the approximate
+			 * height of the power spectrum's asymptotic plateau).
+			 * We scale weight_target by 1/2 because each angle/weight appears 
+			 * twice in the full matrix, but we only calculated the lower half
+			*/ 
+			real_t const weight_target = 
+				std::min(real_t(0.5)*(1. - fInner()), real_t(0.5) * ff_fraction * fInner()); 
+			// We use the geometric mean because it averages over scales
+			real_t geoMean = real_t(0);
+			
+			size_t i = 0;
+			
+			for(; (i < angleVec.size()) and (weight < weight_target); ++i)
+			{
+				//~ geoMean += angleVec[i].second * std::log(angleVec[i].first);
+				//~ weight += angleVec[i].second;
+				geoMean += angleVec[i].weight * std::log(angleVec[i].angle);
+				weight += angleVec[i].weight;
+			}
+			
+			// The loop aborted because we ran out of angles
+			if(i == angleVec.size())
+			{
+				angleVec.clear();
+				n_sorted = 0;
+				printf("	%.3e  %.3e  %.3e  %lu\n", weight, fInner(), weight_target, this->size());
+				std:: cout << "retrying" << std::endl;
+				continue;
+			}
+			
+			printf("[%lu, %lu]", reductions_trk, reductions_twr);
+			
+			return std::exp(geoMean / weight);
 		}
 		
-		// Now sort angles from smallest to largest; keeping the weight 
-		// properly attached to its corresponding angle is why we needed the struct
-		std::sort(angleVec.begin(), angleVec.end(),
-			// We only want to sort by angle (first), so we define a temporary lambda expression
-			[](angle_weight const& left, angle_weight const& right)
-			{return left.first < right.first;});
-			
-		real_t weight = real_t(0);
-		/* Now we add up the smallest angles until their collective weight 
-		 * exceeds some weight target (as a function of <f|f>, the approximate
-		 * height of the power spectrum's asymptotic plateau).
-		 * We scale weight_target by 1/2 because each angle/weight appears 
-		 * twice in the full matrix, but we only calculated the lower half
-		*/ 
-		real_t const weight_target = real_t(0.5) * ff_fraction * fInner(); 
-		// We use the geometric mean because it averages over scales
-		real_t geoMean = real_t(0);
-		
-		size_t i = 0;
-		
-		for(; (i < angleVec.size()) and (weight < weight_target); ++i)
-		{
-			geoMean += angleVec[i].second * std::log(angleVec[i].first);
-			weight += angleVec[i].second;
-		}		
-		// If we need every angle to exceed weight_target, then something is probably wrong
-		assert(i < angleVec.size());
-		
-		return std::exp(geoMean / weight);
+		// This should never happen; the second iteration should be the safety net
+		assert(false);
+		return -INFINITY;
 	}
 }
 
@@ -929,14 +997,14 @@ void PowerSpectrum::Hl_Thread()
 							 * Hardcoding tileWidth  is faster because MOST tiles are full,
 							 * and this solution creates less branches overall.
 							*/ 
-							for(size_t j = 0 ; j < tileWidth; ++j)
+							for(size_t j = 0 ; j < tile.col_width; ++j)
 							{
 								Hl_accumulate[i * tileWidth + j] *= rowShapeVal * colShapeVal[j];
 								
-																					GCC_IGNORE_PUSH(-Wfloat-equal)
-								if(j >= tile.col_width) // Check that assumption
-									assert(Hl_accumulate[i * tileWidth + j] == real_t(0));
-																					GCC_IGNORE_POP
+																					//~ GCC_IGNORE_PUSH(-Wfloat-equal)
+								//~ if(j >= tile.col_width) // Check that assumption
+									//~ assert(Hl_accumulate[i * tileWidth + j] == real_t(0));
+																					//~ GCC_IGNORE_POP
 							}
 						}
 					}
@@ -1187,7 +1255,7 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Obs(size_t const lMax,
 std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Jet(size_t const lMax, 
 	ShapedParticleContainer const& jets, std::vector<real_t> const& hl_detector_Filter)
 {
-	auto Hl_vec = Hl_Job(&jets, &jets, lMax);
+	std::vector<real_t> Hl_vec = Hl_Job(&jets, &jets, lMax);
 	
 	if(hl_detector_Filter.size())
 	{
@@ -1204,7 +1272,7 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Jet(size_t const lMax,
 ////////////////////////////////////////////////////////////////////////
 	
 std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Hybrid(size_t const lMax,
-	std::vector<ShapedJet> const& jets_in, std::vector<real_t> const& hl_detector_Filter,
+	ShapedParticleContainer const& jets, std::vector<real_t> const& hl_detector_Filter,
 	ShapedParticleContainer const& particles,
 	std::vector<real_t> const& Hl_Obs_in)
 {
@@ -1253,11 +1321,6 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Hybrid(size_t const lMax,
 	
 	// Start the calculations involving the jets
 	{
-		// jets_in is passed by REFERENCE to the Hl calculation functions, 
-		// so it MUST have the lifetime of the calculations it is used for;
-		// otherwise the functions will deference a deconstructed object
-		ShapedParticleContainer jets(jets_in);
-		
 		Hl_jets_particles_future = std::async(std::launch::async, &PowerSpectrum::Hl_Job, this,
 			&jets, &particles, lMax);
 			
@@ -1324,7 +1387,8 @@ void PowerSpectrum::WriteToFile(std::string const& filePath,
 	if(not file.is_open())
 		throw std::ios::failure("PowerSpectrum::WriteToFile: File cannot be opened for write: " + filePath);
 	{
-		std::vector<char> buff_vec((Hl_set.size() + 1) * strlen(Hl_format));
+		std::vector<char> buff_vec;
+		buff_vec.reserve((Hl_set.size() + 1) * 30);
 		char* buff = buff_vec.data();
 
 		sprintf(buff, l_format, 0lu);
