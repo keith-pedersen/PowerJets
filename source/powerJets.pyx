@@ -13,7 +13,7 @@
 #~ from libc.stdint cimport int64_t
 #~ from libcpp cimport bool # access bool as bool
 from libcpp.string cimport string # access std::string as string
-#~ from libc.string cimport memcpy
+from libc.string cimport memcpy
 from libcpp.vector cimport vector # access std::vector<T> as vector[T]
 from cython.operator cimport dereference as deref 
 from libcpp.algorithm cimport sort as stdsort
@@ -27,6 +27,7 @@ import math
 
 #####################################################################
 
+# 
 cdef StdVecToNumpy(const vector[double]& stdVec):
 	# Using this "C API" for numpy is deprecated, as the compiler warns,
 	# but I don't know any alternative
@@ -34,7 +35,7 @@ cdef StdVecToNumpy(const vector[double]& stdVec):
 	cdef double* vec = <double*>numpyVec.data
 	
 	# The memcpy appears to the be no faster than the loop, and is less readable
-#~ 	memcpy(<void*>vec, <void*>stdVec.data(), stdVec.size()*sizeof(real_t))
+#~ 	memcpy(<void*>vec, <void*>stdVec.data(), stdVec.size()*sizeof(double))
 	for i in range(stdVec.size()):
 		vec[i] = stdVec[i]
 	return numpyVec
@@ -46,7 +47,7 @@ cimport kdp
 
 import scipy.optimize
 
-include "kdp/kdpVectors.hpy"
+include "kdpVectors.hpy"
 #~ include "/home/keith/Documents/Projects/libkdp/source/kdp.pyx"
 
 #~ cimport kdp
@@ -56,9 +57,10 @@ include "kdp/kdpVectors.hpy"
 
 # To allow the objects to have the same name in Cython and C++,
 # we import as **_c, giving the full C++ name in quotes
-cdef extern from "ShapeFunction.hpp":
-	cdef cppclass h_Boost:
-		vector[double] OnAxis(const size_t) const
+
+#~ cdef extern from "ShapeFunction.hpp":
+#~ 	cdef cppclass h_Boost:
+#~ 		vector[double] OnAxis(const size_t) const
 
 cdef extern from "NjetModel.hpp":
 	cdef cppclass Jet:
@@ -72,7 +74,7 @@ cdef extern from "NjetModel.hpp":
 		Vec4_c p4
 		double mass
 		vector[bool] address
-		h_Boost shape
+#~ 		h_Boost shape
 		
 		ShapedJet()
 		ShapedJet(const double, const double, const double, const double, 
@@ -94,9 +96,12 @@ cdef extern from "NjetModel.hpp":
 		# default assignment (shallow copy) of a binary tree can create pointer errors.
 		# There are two solutions. a = b is equivalent to std::swap(a, b), 
 		# or switch to shared_ptr for b and c. 
-		ShowerParticle(const vector[double]&, const vector[vector[bool]]&, const bool) except +
+#~ 		ShowerParticle(const vector[double]&, const vector[vector[bool]]&, ) except +
 		
-		vector[ShapedJet] GetJets() 
+		@staticmethod
+		ShowerParticle FromParams_OrientationKinematic(const vector[double]&, const vector[vector[bool]]&) except +
+			
+		vector[ShapedJet] GetJets() const
 		
 #~ 	cdef cppclass NjetModel_c "NjetModel":
 #~ 		# The nested class for internal reuse by H_l_JetParticle
@@ -114,7 +119,11 @@ cdef extern from "NjetModel.hpp":
 #~ 		vector[double] H_l_JetParticle(const JetParticle_Cache& cache, 
 #~ 			const vector[PhatF]& particles, 
 #~ 			const double theta, const double phi, const double omega) except +
-		
+
+cdef extern from "PowerSpectrum.hpp":
+	cdef cppclass ArrogantDetector:
+		const vector[Vec3_c]& Tracks() const
+		const vector[Vec3_c]& Towers() const		
 		
 cdef extern from "PowerSpectrum.hpp":
 #~ 	cdef cppclass SpectralPower:
@@ -141,18 +150,22 @@ cdef extern from "LHE_Pythia_PowerJets.hpp":
 		size_t EventIndex()		
 		Status GetStatus()
 		
-		const vector[Vec3_c]& Get_Detected()	
+		const vector[Vec3_c]& Get_Detected() const
+		const ArrogantDetector* Get_Detector() const
 #~ 		const vector[PhatF]& Get_Detected_PhatF()
 #~ 		const vector[double]& Get_H_det(const size_t lMax)	
-		const vector[double]& Get_Hl_Obs(const size_t lMax)
-		const vector[double]& Get_Hl_Jet(const size_t lMax, const vector[ShapedJet]&)
-		const vector[double]& Get_Hl_Hybrid(const size_t lMax, const vector[ShapedJet]&)
-		const vector[Jet]& Get_FastJets()
-		const vector[Jet]& Get_ME()
+		const vector[double]& Get_Hl_Obs(const size_t lMax) const
+		vector[double] Get_Hl_Jet(const size_t lMax, const vector[ShapedJet]&) except +
+		vector[double] Get_Hl_Jet(const size_t lMax, const vector[ShapedJet]&, const double) except +
+		vector[double] Get_Hl_Hybrid(const size_t lMax, const vector[ShapedJet]&) const
+		vector[double] Get_Hl_Hybrid(const size_t lMax, const vector[ShapedJet]&, const double) const
+		const vector[Jet]& Get_ME() const
+		vector[Jet] Cluster_FastJets(const bool) const
+		double Get_RhoPileup() const
 		
 		void WriteAllVisibleAsTowers(const string& filePath) except + 
 		
-		const vector[Vec4_c]& Get_Pileup()
+#~ 		const vector[Vec4_c]& Get_Pileup()
 		
 #~ 		const vector[double]& Get_DetectorFilter(const size_t lMax)
 		
@@ -160,6 +173,7 @@ cdef extern from "LHE_Pythia_PowerJets.hpp":
 		
 		Status Next()
 		Status Repeat()
+		void Set_PileupMu(const double)
 			
 ########################################################################		
 # Now we make the Cython wrapper class of the C++ object
@@ -206,7 +220,7 @@ pileup_key = "pileup_frac"
 # To ellude the auto-default behavior, we must define __cinit__ and __dealloc__, 
 # which in this case requires storing a pointer to the C++ object
 
-cdef class _PowerJetFitter:
+cdef class _PowerJets:
 	''' This class is the compiled innards of a pure Python class we define later.
 	The purpose of this class is to translate fit parameters from Python to C
 	using compiled C code. It does not actually do any of the fitting.''' 
@@ -244,9 +258,25 @@ cdef class _PowerJetFitter:
 		return self.c_pythia.EventIndex()
 		
 	#####################################################################
+	def Get_RhoPileup(self):
+		return self.c_pythia.Get_RhoPileup()
+		
+	#####################################################################
 	def Hl_Obs(self, const int lMax = 128):
 		return StdVecToNumpy(self.c_pythia.Get_Hl_Obs(lMax))
 		
+	#####################################################################
+	def Get_Tracks(self):
+		# Have to make a copy because Cython doesn't know about const_iterator
+		cdef vector[Vec3_c] tracks = deref(self.c_pythia.Get_Detector()).Tracks()
+		return [kdp.Vec3.Factory(<const Vec3_c&>p3) for p3 in tracks]
+	
+	#####################################################################
+	def Get_Towers(self):
+		# Have to make a copy because Cython doesn't know about const_iterator
+		cdef vector[Vec3_c] towers = deref(self.c_pythia.Get_Detector()).Towers()
+		return [kdp.Vec3.Factory(<const Vec3_c&>p3) for p3 in towers]
+	
 	#####################################################################
 	
 	def WriteAllVisibleAsTowers(self, str filePath):
@@ -254,50 +284,50 @@ cdef class _PowerJetFitter:
 		
 	#####################################################################
 	
-	@staticmethod
-	cdef vector[ShapedJet] _GetJets_Momentum(numpy.ndarray[double, ndim=1] jetParams, dict jetParamDict, 
-		const int nShapeParams) except+:
-		''' Interpret the jet parameters as jet momenta.'''
+#~ 	@staticmethod
+#~ 	cdef vector[ShapedJet] _GetJets_Momentum(numpy.ndarray[double, ndim=1] jetParams, dict jetParamDict, 
+#~ 		const int nShapeParams) except+:
+#~ 		''' Interpret the jet parameters as jet momenta.'''
 		
-		cdef int numParams_perJet = 4 + nShapeParams
+#~ 		cdef int numParams_perJet = 4 + nShapeParams
 			
-		balancingJet = jetParamDict.get('force_CM', True)
-		cdef int maxParams = len(jetParams)
-		if(balancingJet): 
-			maxParams -= 1
+#~ 		balancingJet = jetParamDict.get('force_CM', True)
+#~ 		cdef int maxParams = len(jetParams)
+#~ 		if(balancingJet): 
+#~ 			maxParams -= 1
 		
-		momentumStyle = jetParamDict.get('p3_style', JetMomentumStyle.Massless)
-		# JetMomentumStyle
-		# 		massless:		[p1, p2, p3, gamma] 	(the momentum if the jet is massless)
-		# 		direct:		[p1. p2, p3, mass] 	(the momentum is supplied directly)
-		# If balancing jet, the final parameter follows the mass convention
+#~ 		momentumStyle = jetParamDict.get('p3_style', JetMomentumStyle.Massless)
+#~ 		# JetMomentumStyle
+#~ 		# 		massless:		[p1, p2, p3, gamma] 	(the momentum if the jet is massless)
+#~ 		# 		direct:		[p1. p2, p3, mass] 	(the momentum is supplied directly)
+#~ 		# If balancing jet, the final parameter follows the mass convention
 						
-		cdef vector[ShapedJet] jetVec
-		cdef Vec4_c total	
-		cdef Vec4from2 style = V4f2_Boost_preserve_E if (momentumStyle == JetMomentumStyle.Massless) else V4f2_Mass
+#~ 		cdef vector[ShapedJet] jetVec
+#~ 		cdef Vec4_c total	
+#~ 		cdef Vec4from2 style = V4f2_Boost_preserve_E if (momentumStyle == JetMomentumStyle.Massless) else V4f2_Mass
 						
-		if balancingJet:
-			if((len(jetParams) % numParams_perJet) != 1):
-				raise ValueError("PowerJetFitter.GetJets: Momentum basis. Looking for 4 params per jet + mass/boost of balancing jet")
+#~ 		if balancingJet:
+#~ 			if((len(jetParams) % numParams_perJet) != 1):
+#~ 				raise ValueError("PowerJetFitter.GetJets: Momentum basis. Looking for 4 params per jet + mass/boost of balancing jet")
 				
-		elif ((len(jetParams) % numParams_perJet) != 0):
-			raise ValueError("PowerJetFitter.GetJets: Momentum basis. Looking for 4 params per jet (and no balancing jet)")
+#~ 		elif ((len(jetParams) % numParams_perJet) != 0):
+#~ 			raise ValueError("PowerJetFitter.GetJets: Momentum basis. Looking for 4 params per jet (and no balancing jet)")
 		
-		for i in range(0, maxParams, numParams_perJet):
-			jetVec.push_back(ShapedJet(
-				jetParams[i + 0], jetParams[i + 1], jetParams[i + 2],
-				jetParams[i + 3], style, 
-				vector[bool](), jetParams[i + 4: i + 4 + nShapeParams]))
+#~ 		for i in range(0, maxParams, numParams_perJet):
+#~ 			jetVec.push_back(ShapedJet(
+#~ 				jetParams[i + 0], jetParams[i + 1], jetParams[i + 2],
+#~ 				jetParams[i + 3], style, 
+#~ 				vector[bool](), jetParams[i + 4: i + 4 + nShapeParams]))
 				
-			total += jetVec.back().p4
+#~ 			total += jetVec.back().p4
 			
-		if balancingJet:
-			# For both massless and direct momenta, balancing jet's mass is parameterized by gamma,
-			# though this time it preserves momentum. For now, this jet has no shape.
-			jetVec.push_back(ShapedJet(-total.p(), jetParams[-1], V4f2_Boost_preserve_p3, 
-				vector[bool](), vector[double]()))
+#~ 		if balancingJet:
+#~ 			# For both massless and direct momenta, balancing jet's mass is parameterized by gamma,
+#~ 			# though this time it preserves momentum. For now, this jet has no shape.
+#~ 			jetVec.push_back(ShapedJet(-total.p(), jetParams[-1], V4f2_Boost_preserve_p3, 
+#~ 				vector[bool](), vector[double]()))
 			
-		return jetVec
+#~ 		return jetVec
 			
 	#####################################################################
 	
@@ -307,8 +337,8 @@ cdef class _PowerJetFitter:
 		dict jetParamDict, const int nShapeParams) except+:
 		'''Interpret the jet parameters as a splitting tree.'''
 		
-		return ShowerParticle(jetParams, jetParamDict.get("addresses", list()), 
-			jetParamDict.get("orientation", False)).GetJets()
+		return ShowerParticle.FromParams_OrientationKinematic(jetParams, 
+			jetParamDict.get("addresses", list())).GetJets()
 			
 	#####################################################################
 	
@@ -325,24 +355,24 @@ cdef class _PowerJetFitter:
 			
 		#######################
 		# determine param style
-		paramStyle = jetParamDict.get('param_style', JetParamStyle.Splitting)
+#~ 		paramStyle = jetParamDict.get('param_style', JetParamStyle.Splitting)
 		
-		cdef int nShapeParams = jetParamDict.get('num_shape_params', 0)
-		if(nShapeParams < 0):
-			raise ValueError("PowerJetFitter.GetJets: num_shape_params must be non-negative")		
+#~ 		cdef int nShapeParams = jetParamDict.get('num_shape_params', 0)
+#~ 		if(nShapeParams < 0):
+#~ 			raise ValueError("PowerJetFitter.GetJets: num_shape_params must be non-negative")		
 		
-		if(paramStyle == JetParamStyle.Momentum):
-			return _PowerJetFitter._GetJets_Momentum(jetParams, jetParamDict, nShapeParams)
-		elif(paramStyle == JetParamStyle.Splitting):
-			return _PowerJetFitter._GetJets_Splitting(jetParams, jetParamDict, nShapeParams)
-		else:
-			raise ValueError("PowerJetFitter: unrecognized 'param_style' in jetParamDict")		
+#~ 		if(paramStyle == JetParamStyle.Momentum):
+#~ 			return _PowerJets._GetJets_Momentum(jetParams, jetParamDict, nShapeParams)
+#~ 		elif(paramStyle == JetParamStyle.Splitting):
+		return _PowerJets._GetJets_Splitting(jetParams, jetParamDict, 0) # no shape params
+#~ 		else:
+#~ 			raise ValueError("PowerJetFitter: unrecognized 'param_style' in jetParamDict")		
 			
 	#####################################################################
 	
-	def Get_FastJets(self):
+	def Cluster_FastJets(self, bool subtractPileup = False):
 		# Cython can't do a const references, must copy; stupid
-		cdef vector[Jet] jetVec = self.c_pythia.Get_FastJets()
+		cdef vector[Jet] jetVec = self.c_pythia.Cluster_FastJets(subtractPileup)
 		
 		return [kdp.Vec4.Factory(<const Vec4_c&>jet.p4) for jet in jetVec]
 		
@@ -355,19 +385,19 @@ cdef class _PowerJetFitter:
 #~ 	def SetupOrientationFit(self, jetParams, dict jetParamDict, int lMax=128, double granularity=1e6):
 #~ 		'''The orientation fit will use the same jets and density rho'''
 #~ # 		self.cache = self.c_model.Make_JetParticle_Cache(
-#~ # 			_PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict),
+#~ # 			_PowerJets._GetJets(numpy.asarray(jetParams), jetParamDict),
 #~ # 			lMax, granularity)
-#~ 		self.orientationCache =  _PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict)
+#~ 		self.orientationCache =  _PowerJets._GetJets(numpy.asarray(jetParams), jetParamDict)
 		
 #~ 		for jet in self.orientationCache:
 #~ 			print(jet.p4.x0)
 #~ 			jet.shape.OnAxis(lMax) # Generate the on-axis coefficients to cache them
 	
 	@staticmethod
-	def GetJets_All(jetParams, dict jetParamDict, 
+	def GetJets_All(jetParams, dict jetParamDict,
 		const double rotate_theta = 0., const double rotate_phi = 0., const double rotate_omega = 0.):	
 		# Use the internal function to get a vector[Jet], then copy the 4-vectors into newly minted Vec4
-		cdef vector[ShapedJet] jetVec = _PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict)
+		cdef vector[ShapedJet] jetVec = _PowerJets._GetJets(numpy.asarray(jetParams), jetParamDict)
 		
 		if((rotate_theta != 0.) and (rotate_phi != 0.)):
 			Jet.Rotate(jetVec, Vec3_c(1., rotate_theta, rotate_phi, V3f_LengthThetaPhi), rotate_omega)
@@ -382,7 +412,7 @@ cdef class _PowerJetFitter:
 		# I don't know why, but for some reason Cython complains that it can't 
 		# convert from Vec4_c to const Vec4_c, so we have to cast the const-ness ... weird
 		
-		jets, _, _ = _PowerJetFitter.GetJets_All(jetParams, jetParamDict, rotate_theta, rotate_phi)
+		jets, _, _ = _PowerJets.GetJets_All(jetParams, jetParamDict, rotate_theta, rotate_phi)
 		return jets
 		
 	@staticmethod
@@ -391,7 +421,7 @@ cdef class _PowerJetFitter:
 		returning all their mass and address (as separate returns).
 		The addressses only make sense in a splitting tree.'''
 	
-		cdef vector[ShapedJet] jetVec = _PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict)
+		cdef vector[ShapedJet] jetVec = _PowerJets._GetJets(numpy.asarray(jetParams), jetParamDict)
 		
 		stdsort(jetVec.begin(), jetVec.end());
 		
@@ -414,21 +444,16 @@ cdef class _PowerJetFitter:
 		if(lMax < 0):
 			raise ValueError("PowerJetFitter(): lMax must be non-negative.")
 		
-		jetFraction = 1.
-		if (jetParamDict.get(pileup_key, True)):
-			jetFraction -= jetParams[0]
+		f_PU = jetParams[0] if jetParamDict.get(pileup_key, True) else 0.
 			
 		cdef bool hybrid = jetParamDict.get('hybrid', False)
 			
-		cdef vector[ShapedJet] jets = _PowerJetFitter._GetJets(numpy.asarray(jetParams), jetParamDict)
+		cdef vector[ShapedJet] jets = _PowerJets._GetJets(numpy.asarray(jetParams), jetParamDict)
 				
 		if(hybrid):
-			for i in range(jets.size()):
-				jets[i].p4 *= <double>(jetFraction)
-			
-			return StdVecToNumpy(self.c_pythia.Get_Hl_Hybrid(lMax, jets))
+			return StdVecToNumpy(self.c_pythia.Get_Hl_Hybrid(lMax, jets, f_PU))
 		else:
-			return StdVecToNumpy(self.c_pythia.Get_Hl_Jet(lMax, jets)) * jetFraction**2
+			return StdVecToNumpy(self.c_pythia.Get_Hl_Jet(lMax, jets, f_PU))
 		
 	#####################################################################	
 		
@@ -456,9 +481,9 @@ cdef class _PowerJetFitter:
 		cdef numpy.ndarray[double, ndim=1] resid
 		
 		if relative:
-			resid = _PowerJetFitter._RelErrorUtil(fit, obs)
+			resid = _PowerJets._RelErrorUtil(fit, obs)
 		else:
-			resid = _PowerJetFitter._AbsErrorUtil(fit, obs)
+			resid = _PowerJets._AbsErrorUtil(fit, obs)
 			
 		return resid
 #~ 		/numpy.power(numpy.arange(1, len(fit) + 1), 0.5)
@@ -485,9 +510,9 @@ cdef class _PowerJetFitter:
 				Hl_obs = numpy.append(Hl_obs, numpy.mean(Hl_obs_raw[l-5:l+5]))
 		else:
 			Hl_fit = self.Hl_Jet(jetParams, jetParamDict, lMax)
-			Hl_obs = self.Hl_Obs(lMax)[0:lMax]		
+			Hl_obs = self.Hl_Obs(lMax)[0:lMax]	
 				
-		return _PowerJetFitter._Hl_error_vec(Hl_fit, Hl_obs, relative)
+		return _PowerJets._Hl_error_vec(Hl_fit, Hl_obs, relative)
 		
 	def Hl_Jet_error_vec_oneSplit(self, newParams, existingParams, 
 		dict jetParamDict, int lMax, lAsym = [],
@@ -515,7 +540,7 @@ cdef class _PowerJetFitter:
 		Hl_fit = self.Hl_Jet(jetParams, jetParamDict, lMax)
 		Hl_obs = self.Hl_Obs(lMax)[0:lMax]
 			
-		return _PowerJetFitter._Hl_error_vec(Hl_fit, Hl_obs, relative)
+		return _PowerJets._Hl_error_vec(Hl_fit, Hl_obs, relative)
 	
 	@staticmethod
 	def InsertOrientation(orientParams_in, jetParams_in, fitDict):
@@ -540,12 +565,12 @@ cdef class _PowerJetFitter:
 			
 			If relative = True, the residuals are relative.'''
 		
-		jetParamsFinal = _PowerJetFitter.InsertOrientation(orientParams_in, jetParams_in, jetParamDict)
+		jetParamsFinal = _PowerJets.InsertOrientation(orientParams_in, jetParams_in, jetParamDict)
 			
 		Hl_fit = self.Hl_Jet(jetParamsFinal, jetParamDict, lMax)
 		Hl_obs = self.Hl_Obs(lMax)[0:lMax]
 			
-		return _PowerJetFitter._Hl_error_vec(Hl_fit, Hl_obs, relative)
+		return _PowerJets._Hl_error_vec(Hl_fit, Hl_obs, relative)
 		
 #~ 	def Hl_Hybrid(self, angleParams, 
 #~ 		numpy.ndarray[double, ndim=1] H_obs, numpy.ndarray[double, ndim=1] H_jet,
@@ -571,11 +596,14 @@ cdef class _PowerJetFitter:
 			
 #~ 	def Hl_Hybrid_error_vec(self, jetParams, dict jetParamDict, int lMax, const bool relative = False):
 			
-#~ 		return _PowerJetFitter._H_l_error_vec(self.H_l_jet_particle(angleParams, H_obs, H_jet, pileupFrac),
+#~ 		return _PowerJets._H_l_error_vec(self.H_l_jet_particle(angleParams, H_obs, H_jet, pileupFrac),
 #~ 			H_obs, relative)
 			
-	def NumPileup(self):
-		return int(self.c_pythia.Get_Pileup().size());
+#~ 	def NumPileup(self):
+#~ 		return int(self.c_pythia.Get_Pileup().size());
 		
 	def Repeat(self):
 		self.c_pythia.Repeat()
+		
+	def Set_PileupMu(self, float pileup_mu):
+		self.c_pythia.Set_PileupMu(pileup_mu)		

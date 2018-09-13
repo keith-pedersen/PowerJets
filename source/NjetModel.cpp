@@ -266,7 +266,7 @@ void ShowerParticle::MakeDaughters(vec3_t const& p3_b,
 
 ////////////////////////////////////////////////////////////////////////
 
-void ShowerParticle::AppendJets(std::vector<ShapedJet>& existing)
+void ShowerParticle::AppendJets(std::vector<ShapedJet>& existing) const
 {
 	// Only add final-state jets
 	if(isLeaf())
@@ -508,7 +508,7 @@ ShowerParticle::~ShowerParticle()
 
 ////////////////////////////////////////////////////////////////////////
 
-bool ShowerParticle::isBranch()
+bool ShowerParticle::isBranch() const
 {
 	// Consistency check; either both b and c are initialized, or they are both nullptr
 	assert(bool(b) == bool(c));
@@ -517,7 +517,7 @@ bool ShowerParticle::isBranch()
 
 ////////////////////////////////////////////////////////////////////////
 
-bool ShowerParticle::isShowerInexact()
+bool ShowerParticle::isShowerInexact() const
 {
 	if(isLeaf()) // Inexactness arises during splitting, so a leaf cannot be inexact
 		return false;
@@ -554,7 +554,7 @@ ShowerParticle& ShowerParticle::LocateParticle(std::vector<bool> const& theAddre
 
 ////////////////////////////////////////////////////////////////////////
 
-std::vector<ShapedJet> ShowerParticle::GetJets()
+std::vector<ShapedJet> ShowerParticle::GetJets() const
 {
 	std::vector<ShapedJet> retVec;			
 	AppendJets(retVec);
@@ -564,7 +564,7 @@ std::vector<ShapedJet> ShowerParticle::GetJets()
 
 ////////////////////////////////////////////////////////////////////////
 
-ShowerParticle::real_t ShowerParticle::EnergyLoss()
+ShowerParticle::real_t ShowerParticle::EnergyLoss() const
 {
 	if(isLeaf())
 		return real_t(0);
@@ -586,7 +586,7 @@ ShowerParticle::real_t ShowerParticle::EnergyLoss()
 
 ////////////////////////////////////////////////////////////////////////
 
-ShowerParticle::real_t ShowerParticle::Total_absElost(real_t const absElost_in)
+ShowerParticle::real_t ShowerParticle::Total_absElost(real_t const absElost_in) const
 {
 	if(isLeaf())
 		return real_t(0);

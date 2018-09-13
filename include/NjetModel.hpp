@@ -330,7 +330,7 @@ class ShowerParticle : public ShapedJet
 		 *  Only "leaves" (\ref isLeaf) are appended. 
 		 *  Used by GetJets() to find all final-state jets.
 		*/ 
-		void AppendJets(std::vector<ShapedJet>& existing);
+		void AppendJets(std::vector<ShapedJet>& existing) const;
 		
 		//! @brief The CM frame momentum function.
 		static real_t Delta2(real_t const sum, real_t const diff);
@@ -353,7 +353,7 @@ class ShowerParticle : public ShapedJet
 		 *  \note This is unsafe because it de-references \ref b and \ref c without 
 		 *  checking for their validity.
 		 */ 
-		real_t EnergyLoss_unsafe() // 
+		real_t EnergyLoss_unsafe() const // 
 		{
 			return (b->p4.x0 + c->p4.x0) - p4.x0;
 		}
@@ -467,7 +467,7 @@ class ShowerParticle : public ShapedJet
 		 *  \note We detect the presence of orientation parameters \em only when 
 		 *  <tt> params_orientationKinematic.size() % 4 == 0 </tt>.
 		*/ 
-		ShowerParticle FromParams_OrientationKinematic(std::vector<real_t> const& params_orientationKinematic, 
+		static ShowerParticle FromParams_OrientationKinematic(std::vector<real_t> const& params_orientationKinematic, 
 			std::vector<std::vector<bool>> const& addresses = {});
 			
 		/*! \defgroup OnlyMove 
@@ -486,19 +486,19 @@ class ShowerParticle : public ShapedJet
 		~ShowerParticle();
 	
 		//! @brief A "branch" in the shower tree has daughters (is has split).
-		bool isBranch();
+		bool isBranch() const;
 		
 		//! @brief A "leaf" in the shower tree has no daughters (it has not split).
 		//! This makes it a final-state particle.
-		inline bool isLeaf() {return not isBranch();}
+		inline bool isLeaf() const {return not isBranch();}
 		
 		/*! @brief \p true if this particle's energy was not exactly conserved when it split
 		 *  (always \p false if \ref isLeaf).
 		*/  
-		inline bool isInexact() {return inexact;}
+		inline bool isInexact() const {return inexact;}
 		
 		//! @brief \p true if this particle, or any descendants, \ref isInexact
-		bool isShowerInexact();
+		bool isShowerInexact() const;
 		
 		/*! @brief Locate a particle in the shower, given its address relative to this particle.
 		 *  
@@ -515,10 +515,10 @@ class ShowerParticle : public ShapedJet
 		ShowerParticle& LocateParticle(std::vector<bool> const& address);
 		
 		//! @brief Return the final-state (leaf) descendants of this particle as ShapedJets.
-		std::vector<ShapedJet> GetJets();
+		std::vector<ShapedJet> GetJets() const;
 		
 		//! @brief Return the energy lost when this particle split (0 if isLeaf).
-		real_t EnergyLoss();
+		real_t EnergyLoss() const;
 		
 		//! @brief Return the sum of 4-momenta for the jets returned by this->GetJets.
 		//~ vec4_t Total_p4();
@@ -526,7 +526,7 @@ class ShowerParticle : public ShapedJet
 		/*! @brief From this particle, descend into the shower and 
 		 *  add up the (absolute) energy lost by all splittings.
 		*/
-		real_t Total_absElost(real_t const absElost_in = real_t(0));
+		real_t Total_absElost(real_t const absElost_in = real_t(0)) const;
 };
 
 GCC_IGNORE_POP

@@ -10,7 +10,10 @@
 #include "NjetModel.hpp"
 #include "ShapeFunction.hpp"
 
-#include "fastjet/ClusterSequence.hh"
+#include "fastjet/AreaDefinition.hh"
+#include "fastjet/Selector.hh"
+#include "fastjet/tools/JetMedianBackgroundEstimator.hh"
+#include "fastjet/tools/Subtractor.hh"
 
 #include <Pythia8/Pythia.h>
 
@@ -85,7 +88,16 @@ class LHE_Pythia_PowerJets
 			, ABORT_MAX //! @brief Pythia aborted too many times ... something's wrong
 			};
 		
+		//! @brief The default location of the INI file
 		static constexpr char const* const INI_filePath_default = "PowerJets.ini";
+		
+		/*! @brief The default location of Pythia's main particle settings
+		 * 
+		 *  This is the first argument sent to the Pythia constructor, 
+		 *  and this string its default value. In order to send true/false 
+		 *  for the second argument (printBanner), we store the default value.
+		*/		
+		static constexpr char const* const Pythia_xmlDoc = "../share/Pythia8/xmldoc";
 		
 		//! @brief Average jet energy fraction carried by charged particles (measured at LHC)
 		static constexpr real_t chargeFraction = real_t(0.59);
@@ -107,6 +119,9 @@ class LHE_Pythia_PowerJets
 			 *  which reads all detector settings from this section.
 			*/
 			Param<std::string> Main__detectorName = Param<std::string>("Main/detectorName", "Detector");
+			
+			//! @brief Print the banners of the embedded programs
+			Param<bool> Main__printBanners = Param<bool>("Main/printBanners", true);
 			
 			///////////////////////////////////////////////////////////////
 			// Pythia
@@ -146,7 +161,7 @@ class LHE_Pythia_PowerJets
 			Param<double> PowerJets__u_track = Param<double>("PowerJets/u_track", 0.9);
 			
 			///////////////////////////////////////////////////////////////
-			// fastjet
+			// FastJet
 			///////////////////////////////////////////////////////////////
 			
 			//! @brief The clustering algorithm ("kt", "CA" (Cambridge-Aacen), "anti-kt")
@@ -155,8 +170,18 @@ class LHE_Pythia_PowerJets
 			//! @brief The clustering radius
 			Param<double> FastJet__R = Param<double>("FastJet/R", 0.4);
 			
+			//! @brief The clustering algorithm ("kt", "CA" (Cambridge-Aacen), "anti-kt")
+			//! for pileup density estimation
+			Param<std::string> FastJet__algo_pileup = Param<std::string>("FastJet/algo_pileup", "kt");
+						
+			//! @brief The clustering radius for pileup density estimation
+			Param<double> FastJet__R_pileup = Param<double>("FastJet/R_pileup", 0.4);
+			
+			//! @brief The number of hardest jets to exclude from pileup density estimation
+			Param<size_t> FastJet__nHardExclude_pileup = Param<size_t>("FastJet/nHardExclude_pileup", 2);		
+			
 			///////////////////////////////////////////////////////////////
-			// fastjet
+			// Pileup
 			///////////////////////////////////////////////////////////////
 			
 			/*! @brief The exact number of pileup vertices.
@@ -164,7 +189,7 @@ class LHE_Pythia_PowerJets
 			 *  This is a placeholder for the mean of a Poisson distribution, 
 			 *  which will be implemented eventually.
 			*/ 
-			Param<double> Pileup__mu = Param<double>("Pileup/mu", 40.);
+			Param<double> Pileup__mu = Param<double>("Pileup/mu", 0.);
 			
 			/*! @brief The file path for a separate Pythia.conf file to 
 			 *  control pileup generation.
@@ -173,42 +198,94 @@ class LHE_Pythia_PowerJets
 			*/ 
 			Param<std::string> Pileup__confPath = Param<std::string>("Pileup/confPath", "./Pileup.conf");
 			
+			/*! @brief The file path for a file storing the pileup "up" coefficient
+			 *  measured in a prior experiment on the same detector and pileup configuration.
+			 * 
+			 *  \warning The coefficients are read verbatim; the user shall ensure 
+			 *  that this file corresponds exactly to the same detector and Pileup.conf.
+			*/ 
+			Param<std::string> Pileup__hlPath = Param<std::string>("Pileup/hlPath", "");
+			
 			Settings(QSettings const& parsedINI);
 			~Settings() {}
 		};
 		
 	private:
+		Settings settings; //!< @brief Settings to control the generator
+	
+		//////////////////////////////////////////////////////////////////
+		// Pythia
+		//////////////////////////////////////////////////////////////////
+	
 		Pythia8::Pythia pythia; //!< @brief The Pythia instance
-		Pythia8::Pythia* pileup; //!< @brief A secondary Pythia instance, used for pileup
+		/*! @brief A secondary (optional) Pythia instance, used for pileup
+		 * 
+		 *  We use a pointer to avoid creating an unused object
+		*/ 
+		Pythia8::Pythia* pileup;
+		
+		//////////////////////////////////////////////////////////////////
+		// Detector
+		//////////////////////////////////////////////////////////////////
 		
 		/*! @brief The detector
 		 *  
 		 *  This is a pointer so we can have either 
 		 *  ArrogantDetector_Lepton or ArrogantDetector_Hadron.
 		*/ 
-		ArrogantDetector* detector; 
+		ArrogantDetector* detector;
+		
+		//////////////////////////////////////////////////////////////////
+		// PowerSpectrum
+		//////////////////////////////////////////////////////////////////
 		
 		mutable PowerSpectrum Hl_computer; //!< @brief A thread pool to calculate the power spectrum
-		fastjet::JetDefinition clusterAlg; //!< @brief FastJet's clustering algorithm
-		//~ pqRand::engine gen; //!< @brief A PRNG
 		
-		size_t nextCount; //!< @brief The number of times Next() has been called
+		//////////////////////////////////////////////////////////////////
+		// FastJet
+		//////////////////////////////////////////////////////////////////
+		
+		//! @brief The clustering algorithm for the hard scatter
+		fastjet::JetDefinition clusterAlg;
+		//! @brief The clustering algorithm for the pileup density estimator
+		fastjet::JetDefinition clusterAlg_pileup;
+		
+		//! @brief The jet area definition for the hard scatter
+		fastjet::AreaDefinition areaDef;
+		//! @brief The jet area definition for the pileup density estimator
+		fastjet::AreaDefinition areaDef_pileup;
+		
+		//! @brief To select which jets are used for the pileup density estimator
+		fastjet::Selector pileupSelector;
+		//! @brief To estimate the average pileup density
+		mutable fastjet::JetMedianBackgroundEstimator pileupEstimator;
+		//! @brief To subtract pileup from jets, based upon their area
+		fastjet::Subtractor pileupSubtractor;		
+				
+		//////////////////////////////////////////////////////////////////
+		// Bookkeeping
+		//////////////////////////////////////////////////////////////////
+		
+		size_t nextCount; //!< @brief The number of times pythia.next() has been called
 		size_t nextCount_max; //!< @brief The maximum nextCount before Next() has no effect
-		size_t abortCount;
-		Status status; //!< @brief The status of the generator
+		size_t abortCount; //!< @brief Count of pythia aborts (failed events)
+		Status status; //!< @brief The status of the generator		
 		
-		Settings settings;
+		//////////////////////////////////////////////////////////////////
+		// Cached detection
+		//////////////////////////////////////////////////////////////////
+		
+		//~ DetectorObservation observation; //!< @brief The raw detector observation
+		ShapedParticleContainer tracksTowers; //!< @brief The extensive tracks and towers
 				
 		// For now, we only cache the pieces we need
 		std::vector<vec3_t> detected; //!< @brief The final state particles
 		mutable std::vector<real_t> Hl_Obs; //!< @brief The power spectrum of detector particles (in the lab frame)
-		mutable std::vector<Jet> fast_jets; //!< @brief Jets clustered from \ref detected using FastJet
 		//~ mutable std::vector<real_t> detectorFilter; //!< @brief The "up" coefficient for the detector
-			
-		//~ DetectorObservation observation; //!< @brief The raw detector observation
-		ShapedParticleContainer tracksTowers; //!< @brief The extensive tracks and towers
+		std::shared_ptr<ShapeFunction> pileupShape;
 		
 		// Original, isotropic pileup
+		//~ pqRand::engine gen; //!< @brief A PRNG
 		
 		//~ enum class PileupBalancingScheme {back2back, shim};
 		//~ real_t pileup_noise2signal;
@@ -223,6 +300,10 @@ class LHE_Pythia_PowerJets
 		*/ 
 		std::stringstream fastjet_banner_dummy;
 		
+		//////////////////////////////////////////////////////////////////
+		// Methods
+		//////////////////////////////////////////////////////////////////
+		
 		void Clear(); //!< @brief Clear all caches
 		
 		/*! @brief Call pythia.Next(), check for errors, then "do work" if requested
@@ -231,14 +312,27 @@ class LHE_Pythia_PowerJets
 		 *  This is used to skip the first events in an LHE file
 		 *  while still running the skipped events through Pythia so that 
 		 *  its PRNG is called the same number of times.
-		 *  This ensures that event_10 will look the same regardless if 
+		 *  This ensures that event_10 will look the same whether or not 
 		 *  event_0 through event_9 are analyzed.
 		*/  
 		Status Next_internal(bool doWork);		
 		Status DoWork(); //!< @brief Detect and analyze the event
 		
-		//!< @brief Cluster the final state with FastJet, caching the clustered jets
-		void ClusterJets() const; 
+		//! @brief Initialize a FastJet clustering algorithm and pileup subtractor
+		void Initialize_FastJet();
+		
+		//! @brief Create and initialize the Pythia instances that generates pileup
+		void Initialize_Pythia();
+		
+		/*! @brief Initialize the Pythia generator responsible for pileup
+		 * 
+		 *  \note This takes some time. If settings.Pileup__mu <= 0 or the
+		 *  pileup generator has already been initialized, this function has no effect.
+		*/ 
+		void Warmup_Pileup();
+		
+		//!< @brief Cluster the final state with FastJet
+		std::vector<Jet> ClusterJets(bool const subtractPileup = false) const;
 		
 	public:
 		//! @brief Construct a QSettings object and call the other constructor
@@ -257,7 +351,10 @@ class LHE_Pythia_PowerJets
 		*/
 		Status Next() {return Next_internal(true);} // doWork = true
 		
-		//~ Status Repeat() {return DoWork();}
+		//! @brief Repeat detection (which includes re-generating pileup)
+		Status Repeat() {return DoWork();}
+		
+		void Set_PileupMu(double const pileup_mu);
 		
 		//! @brief The index of the current event
 		size_t EventIndex() const {return nextCount - 1;}
@@ -271,27 +368,40 @@ class LHE_Pythia_PowerJets
 		//! @brief Convert the LHE matrix element (parton-level event) into Jet's
 		std::vector<Jet> const Get_ME() const 
 			{return std::vector<Jet>(detector->ME().cbegin(), detector->ME().cend());}
-		
-		//~ std::vector<vec4_t> const& Get_Pileup() {return pileup;}
-		
+			
 		//! @brief Cluster the detected particles into jets and return
-		std::vector<Jet> const& Get_FastJets() const;
+		std::vector<Jet> Cluster_FastJets(bool const subtractPileup = false) const;
+		
+		//! @brief Return the pileup density (only valid after ClusterFastJets(true))
+		double Get_RhoPileup() const;
+				
+		//~ std::vector<vec4_t> const& Get_Pileup() {return pileup;}		
 		
 		Settings const& Get_Settings() const {return settings;}
 		
 		ArrogantDetector const* Get_Detector() const {return detector;}
 		
-		//! @brief Calculate the power spectrum of the observed final state
+		//! @brief Construct a container of jets with pileup
+		ShapedParticleContainer JetContainer(std::vector<ShapedJet> const& jets, 
+			real_t const f_pileup = real_t(0)) const;
+		
+		//! @brief Calculate the power spectrum of the observed final state using the natural resolution
 		std::vector<real_t> const& Get_Hl_Obs(size_t const lMax) const;
 		
-		//! @brief Calculate the power spectrum of an ensemble of ShapedJet's
-		std::vector<real_t> Get_Hl_Jet(size_t const lMax, std::vector<ShapedJet> const& jets) const;
-		
-		/*! @brief Calculate the "hybrid" power spectrum between jets and the observed final state
+		/*! @brief Calculate the power spectrum of an ensemble of ShapedJet's and pileup
 		 * 
-		 *  See PowerSpectrum::Hl_Hybrid for more details
+		 *  The pileup shape is read upon initialization.
 		*/ 
-		std::vector<real_t> Get_Hl_Hybrid(size_t const lMax, std::vector<ShapedJet> const& jets) const;
+		std::vector<real_t> Get_Hl_Jet(size_t const lMax, 
+			std::vector<ShapedJet> const& jets, real_t const f_pileup = real_t(0)) const;
+		
+		/*! @brief Calculate the "hybrid" power spectrum between jets/pileup and the observed final state
+		 * 
+		 *  See PowerSpectrum::Hl_Hybrid for more details.
+		 *  The pileup shape is read upon initialization.
+		*/ 
+		std::vector<real_t> Get_Hl_Hybrid(size_t const lMax, 
+			std::vector<ShapedJet> const& jets, real_t const f_pileup = real_t(0)) const;
 		
 		/*! @brief Bin all detector into the calorimeter, 
 		 *  then write the tower edges and energy to a file.
