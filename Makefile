@@ -27,7 +27,7 @@ EXAMPLES = ./examples
 
 INC_FLAGS = -I $(INCLUDE) -I $(LOCAL_DIR)/include
 LOCAL_LIBS = -lpythia8 -lfastjet -lfastjettools -lpqr -lkdp
-EXTERN_LIB_FLAGS = -lstdc++ -lm -lQtCore -L $(LOCAL_DIR)/lib $(LOCAL_LIBS)
+EXTERN_LIB_FLAGS = -lstdc++ -lm -lQtCore -lopenblas -L $(LOCAL_DIR)/lib $(LOCAL_LIBS)
 LIB_FLAGS = $(EXTERN_LIB_FLAGS) -L $(PJ_DIR) -lpJets
 
 EXAMPLES_CPP = $(wildcard examples/*.cpp)

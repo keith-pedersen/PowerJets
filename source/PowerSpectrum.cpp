@@ -342,32 +342,35 @@ PowerSpectrum::DetectorObservation PowerSpectrum::DetectorObservation::NaiveObse
 ////////////////////////////////////////////////////////////////////////
 
 PowerSpectrum::ShapedParticleContainer PowerSpectrum::DetectorObservation::MakeExtensive
-	(double const f_trackR, double const u_trackR) const
+	(real_t const angularResolution, real_t const f_trackR, double const u_trackR) const
 {
 	PowerSpectrum::ShapedParticleContainer container;
 	
 	if(tracks.size())
-	{
-		
+	{	
 												GCC_IGNORE_PUSH(-Wfloat-equal)
 		if((f_trackR == real_t(0)) or (u_trackR == real_t(1)))
 			container.append(tracks);
 		else
 			container.append(tracks,
-				ShapeFunction::Make<h_PseudoNormal>(f_trackR * AngularResolution(), u_trackR));
+				ShapeFunction::Make<h_PseudoNormal>(f_trackR * angularResolution, u_trackR));
 												GCC_IGNORE_POP
 	}
 
 	CheckValidity_TowerArea();
 	
+	// Use the angular resolution to define the minimum tower area
+	real_t const towerArea_min = kdp::Squared(std::sin(real_t(0.5) * angularResolution));
+	
 	// Either there is one area for every tower, or one for all to share
 	if(towerAreas.size() < towers.size())
 		container.append(towers, 
-			ShapeFunction::Make<h_Cap>(towerAreas.front()));
+			ShapeFunction::Make<h_Cap>(std::max(towerAreas.front(), towerArea_min)));
 	else
 	{
 		for(size_t i = 0; i < towers.size(); ++i)
-			container.emplace_back(towers[i], ShapeFunction::Make<h_Cap>(towerAreas[i]));
+			container.emplace_back(towers[i], 
+				ShapeFunction::Make<h_Cap>(std::max(towerArea_min, towerAreas[i])));
 	}
 	
 	return container;
@@ -375,7 +378,7 @@ PowerSpectrum::ShapedParticleContainer PowerSpectrum::DetectorObservation::MakeE
 
 ////////////////////////////////////////////////////////////////////////
 
-PowerSpectrum::real_t PowerSpectrum::DetectorObservation::SmearedDistance_TrackTower(real_t const r)
+PowerSpectrum::real_t PowerSpectrum::SmearedDistance_TrackTower(real_t const r)
 {
 	// Fit to Monte Carlo integration results
 	static constexpr real_t a = 0.667;
@@ -384,7 +387,9 @@ PowerSpectrum::real_t PowerSpectrum::DetectorObservation::SmearedDistance_TrackT
 	return std::pow(std::pow(a, b) + std::pow(r, b), real_t(1)/b);	
 }
 
-PowerSpectrum::real_t PowerSpectrum::DetectorObservation::SmearedDistance_TowerTower(real_t const r)
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::real_t PowerSpectrum::SmearedDistance_TowerTower(real_t const r)
 {
 	// Fit to Monte Carlo integration results
 	static constexpr real_t a = 0.641;
@@ -394,248 +399,28 @@ PowerSpectrum::real_t PowerSpectrum::DetectorObservation::SmearedDistance_TowerT
 }
 
 ////////////////////////////////////////////////////////////////////////
-
-PowerSpectrum::real_t PowerSpectrum::DetectorObservation::AngularResolution
-	(real_t const ff_fraction) const
-{
-	struct AngleWeight
-	{
-		real_t angle; 
-		real_t weight;
-		
-		//~ using iter_t = std::vector<AngleWeight>::iterator;
-		
-		AngleWeight() = default;
-		AngleWeight(real_t const angle_in, real_t const weight_in):
-			angle(angle_in), weight(weight_in) {}
-		
-		bool operator<(AngleWeight const& rhs) const
-		{
-			return (this->angle < rhs.angle);
-		}
-		
-		// Sort a vector whose head is sorted and tail in unsorted
-		static void ReSort(std::vector<AngleWeight>& headTail, size_t const n_sorted)
-		{
-			assert(n_sorted <= headTail.size());
-			std::sort(headTail.begin() + n_sorted, headTail.end());
-			
-			if(n_sorted > 0)
-				std::inplace_merge(headTail.begin(), headTail.begin() + n_sorted, headTail.end());
-		}
-	};	
-	
-	CheckValidity_TowerArea();
-	if(std::fabs(1. - this->fTotal()) > 1e-8)
-		printf("wtf: %.3e\n", std::fabs(1. - this->fTotal()));
-	
-	if(size() < 3)
-	{
-		if(size() == 2) // Only two tracks? The angular resolution is approximately M_Pi
-			return M_PI;
-		else
-			return INFINITY;
-	}
-	else
-	{
-		std::vector<real_t> twrRadii;
-		
-		size_t reductions_trk = 0;
-		size_t reductions_twr = 0;		
-		
-		// Integrating \int_0^thetaR dOmega = 
-		// 2 pi (1-cos(thetaR)) = Omega ==> sin(thetaR/2)**2 = surfaceFraction
-		for(real_t const surfaceFraction : towerAreas)
-			twrRadii.emplace_back(real_t(2)*std::asin(std::sqrt(surfaceFraction)));
-		
-		// If all towers share the same radii, simply copy that universal radii
-		// (this rote copying simplifies the logic of the inner loop)
-		if(twrRadii.size() < towers.size())
-			twrRadii.assign(towers.size(), twrRadii.at(0));
-			
-		// Create a list of inter-particle angles and correlation weight = f_i * f_j
-		std::vector<AngleWeight> angleVec;
-		angleVec.reserve(this->size());
-		size_t n_sorted = 0;
-		
-		// We expect that the angular resolution will be calculated by 
-		// N inter-particle angles (Ex(<f|f>) ~= 1/n, and Ex(f) = 1/n, 
-		// so n * f * f ~= <f|f>
-		// Even though we only store a fraction of the total inter-particle angles, 
-		// we know they are the smallest \p maxSize inter-particle angles
-		// because the only way you can evicted from the smallest list
-		// is if something is smaller than you.
-		for(size_t const angleVec_maxSize : {size_t(2. * ff_fraction * double(this->size())),
-			kdp::GaussSum(this->size() - 1)})
-		{
-			for(auto trk = tracks.cbegin(); trk not_eq tracks.cend(); ++trk)
-			{
-				// We only calculate the lower-half of the symmetric inter-particle matrix
-				for(auto trk_other = tracks.cbegin(); trk_other not_eq trk; ++trk_other)
-				{
-					angleVec.emplace_back(
-						// No smearing between tracks; assume very well measured
-						trk->pHat.InteriorAngle(trk_other->pHat),
-							trk->f * trk_other->f);
-				}
-				
-				for(size_t twr_i = 0; twr_i < towers.size(); ++twr_i)
-				{
-					// We calculate the dimensionless smeared angle, then rescale it by the tower radius
-					angleVec.emplace_back(
-						twrRadii[twr_i] * SmearedDistance_TrackTower(
-							trk->pHat.InteriorAngle(towers[twr_i].pHat)/twrRadii[twr_i]),
-						trk->f * towers[twr_i].f);
-				}
-				
-				if(angleVec.size() > 2 * angleVec_maxSize)
-				{
-					++reductions_trk;
-					AngleWeight::ReSort(angleVec, n_sorted);
-					angleVec.resize(angleVec_maxSize);
-					n_sorted = angleVec_maxSize;
-				}
-			}
-			
-			for(size_t twr_i = 0; twr_i < towers.size(); ++twr_i)
-			{
-				// We only calculate the lower-half of the symmetric inter-particle matrix
-				for(size_t twr_j = 0; twr_j < twr_i; ++twr_j)
-				{
-					// For two towers, we use their shared radius
-					real_t const twoTowerRadius = std::hypot(twrRadii[twr_i], twrRadii[twr_j]);
-					
-					angleVec.emplace_back(
-						twoTowerRadius	* SmearedDistance_TowerTower(
-							towers[twr_i].pHat.InteriorAngle(towers[twr_j].pHat)/twoTowerRadius),
-						towers[twr_i].f * towers[twr_j].f);
-				}
-				
-				if(angleVec.size() > 2 * angleVec_maxSize)
-				{
-					++reductions_twr;
-					AngleWeight::ReSort(angleVec, n_sorted);
-					angleVec.resize(angleVec_maxSize);
-					n_sorted = angleVec_maxSize;
-				}
-			}
-			// Now sort angles from smallest to largest; keeping the weight 
-			// properly attached to its corresponding angle is why we needed the struct
-			//~ std::sort(angleVec.begin(), angleVec.end());
-			// We only want to sort by angle (first), so we define a temporary lambda expression
-			//~ [](AngleWeight const& left, AngleWeight const& right)
-			//~ {return left.first < right.first;});
-			AngleWeight::ReSort(angleVec, n_sorted);			
-		
-			real_t weight = real_t(0);
-			/* Now we add up the smallest angles until their collective weight 
-			 * exceeds some weight target (as a function of <f|f>, the approximate
-			 * height of the power spectrum's asymptotic plateau).
-			 * We scale weight_target by 1/2 because each angle/weight appears 
-			 * twice in the full matrix, but we only calculated the lower half
-			*/ 
-			real_t const weight_target = 
-				std::min(real_t(0.5)*(1. - fInner()), real_t(0.5) * ff_fraction * fInner()); 
-			// We use the geometric mean because it averages over scales
-			real_t geoMean = real_t(0);
-			
-			size_t i = 0;
-			
-			for(; (i < angleVec.size()) and (weight < weight_target); ++i)
-			{
-				//~ geoMean += angleVec[i].second * std::log(angleVec[i].first);
-				//~ weight += angleVec[i].second;
-				geoMean += angleVec[i].weight * std::log(angleVec[i].angle);
-				weight += angleVec[i].weight;
-			}
-			
-			// The loop aborted because we ran out of angles
-			if(i == angleVec.size())
-			{
-				angleVec.clear();
-				n_sorted = 0;
-				printf("	%.3e  %.3e  %.3e  %lu\n", weight, fInner(), weight_target, this->size());
-				std:: cout << "retrying" << std::endl;
-				continue;
-			}
-			
-			printf("[%lu, %lu]", reductions_trk, reductions_twr);
-			
-			return std::exp(geoMean / weight);
-		}
-		
-		// This should never happen; the second iteration should be the safety net
-		assert(false);
-		return -INFINITY;
-	}
-}
-
-////////////////////////////////////////////////////////////////////////
 // PowerSpectrum::Job
 ////////////////////////////////////////////////////////////////////////
 
-PowerSpectrum::Job::Job(ShapedParticleContainer const* const left_in,
-	ShapedParticleContainer const* const right_in,
-	size_t const lMax_in, 
-	std::vector<TileSpecs>&& tileVec_in):
-tileVec(std::move(tileVec_in)), // steal the vector
-nextTile(0), remainingTiles(tileVec.size()), 
-left(left_in), right(right_in), lMax(lMax_in) {}
-
+PowerSpectrum::Job::Job():
+	remainingTiles(0), nextTile(0) {}
+	
 ////////////////////////////////////////////////////////////////////////
 
-bool PowerSpectrum::Job::GetTile(TileSpecs& tile)
+PowerSpectrum::Job::TileSpecs* PowerSpectrum::Job::NextTile()
 {
 	// nextTile is a std::atomic, so assigning tiles based on its incremented value is thread-safe.
 	// It would not be thread safe to exit a condition_variable based upon tileIndex; 
 	// however, job completion is based on tiles which are complete, not merely assigned.
 	size_t const tileIndex = nextTile++;
 	
-	if(tileIndex < tileVec.size()) // Only assign tiles if they exists
-	{
-		tile = tileVec[tileIndex];
-		return true; // tile was set
-	}
-	else return false; // tile was not set, don't use it
+	return (tileIndex < tileVec.size()) ? 
+		tileVec[tileIndex].operator->() : nullptr;
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-void PowerSpectrum::Job::Add_Hl(std::vector<real_t>& Hl_partial, size_t const numTiles)
-{
-	// Don't waste time synchronizing if no tiles were pulled; nothing to do
-	if(numTiles) 
-	{
-		//Synchronize Hl_total and remainingTiles (job completion)
-		std::unique_lock<std::mutex> lock(jobLock);
-
-		if(Hl_total.empty())
-			// The first thread to finish simply sets it's data (std::move for quickness)
-			Hl_total = std::move(Hl_partial);
-		else
-			Hl_total += Hl_partial; // Otherwise we add to the existing
-			
-		remainingTiles -= numTiles;
-		assert(remainingTiles <= tileVec.size());
-		
-		// Unlock before notify to prevent hurry-up-and-wait
-		lock.unlock();
-	
-		// If all tiles are done, notify the sub-manager (we are outside of lock, 
-		// so this could create a race to notify, but that's not a problem).
-		if(remainingTiles == 0)
-		{
-			// Sanity check; if the job is done, all tiles were assigned
-			assert(nextTile >= tileVec.size());
-			
-			done.notify_one();
-		}
-	}
-}
-
-////////////////////////////////////////////////////////////////////////
-
-std::vector<PowerSpectrum::real_t> PowerSpectrum::Job::Get_Hl()
+void PowerSpectrum::Job::WaitTillDone() const
 {
 	// Synchronize remainingTiles (job completion)
 	std::unique_lock<std::mutex> lock(jobLock);
@@ -643,306 +428,221 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Job::Get_Hl()
 	// Wait until there are no more threads actively working on this job.
 	while(remainingTiles)
 		done.wait(lock);
+}
+
+////////////////////////////////////////////////////////////////////////
+// PowerSpectrum::Job_Hl
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::Job_Hl::Job_Hl(size_t const lMax_in, 
+	ShapedParticleContainer const& left,
+	ShapedParticleContainer const& right):
+Job(),
+rows(&left), cols(&right), lMax(lMax_in)
+{
+	if(rows == cols)
+		tileVec = TileSpecs::Partition_Symmetric_ptr(rows->size());
+	else
+		tileVec = TileSpecs::Partition_ptr(rows->size(), cols->size());
+		
+	remainingTiles = tileVec.size();
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void PowerSpectrum::Job_Hl::Accumulate::operator()(std::vector<real_t>& Hl_partial)
+{
+	if(empty())
+		// The first thread to finish simply sets it's data (std::move for quickness)
+		this->std::vector<real_t>::operator=(std::move(Hl_partial));
+	else
+		static_cast<std::vector<real_t>&>(*this) += Hl_partial; // Otherwise we add to the existing
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void PowerSpectrum::Job_Hl::Finalize_Thread(size_t const numTiles, 
+	std::vector<real_t>& Hl_partial)
+{
+	Job::Finalize_Thread(numTiles, Hl_total, Hl_partial);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+std::vector<PowerSpectrum::real_t> PowerSpectrum::Job_Hl::Get_Hl()
+{
+	WaitTillDone();
 	
 	// When the job is done, steal the final vector and return
 	return std::move(Hl_total);
 }
 
 ////////////////////////////////////////////////////////////////////////
-//  PowerSpectrum
-////////////////////////////////////////////////////////////////////////
-		
-void PowerSpectrum::Hl_Thread()
+
+PowerSpectrum::Job_Hl::ApplyShapes PowerSpectrum::Job_Hl::BitAnd
+	(ApplyShapes const left, ApplyShapes const right)
 {
-	// We calculate the entire square tile at once;
-	static constexpr size_t incrementSize = kdp::Squared(tileWidth);
-	using array_t = std::array<real_t, incrementSize>;
-	using shapePtr_t = std::shared_ptr<ShapeFunction>;
-				
-	// Permanently store the arrays which are vectorized, for better compiler optimization	
-	// Recursively calculate Pl(pHat_i.Dot(pHat_j))
-	RecursiveLegendre_Increment<array_t> Pl_computer; // Pl_computer.z = pHat_i.Dot(pHat_j)
-	array_t fProd; // f_i * f_j (not l-dependent)
-	array_t Hl_accumulate;
-	// The values of hl for each column (the inner loop); we do not need one for rows
-	std::array<real_t, tileWidth> colShapeVal; 
-			
-	std::shared_ptr<Job> job;
-		
-	// Request jobs; Dispatch() will block until there are jobs, 
-	// and return nullptr when it's time to die (exit the main loop and return)
-	while((job = Dispatch()))
+	return ApplyShapes(ApplyShapes_t(left) bitand ApplyShapes_t(right));
+}
+
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::Job_Hl::ApplyShapes PowerSpectrum::Job_Hl::BitOr
+	(ApplyShapes const left, ApplyShapes const right)
+{
+	return ApplyShapes(ApplyShapes_t(left) bitor ApplyShapes_t(right));
+}
+
+////////////////////////////////////////////////////////////////////////
+
+bool PowerSpectrum::Job_Hl::IsBefore(ApplyShapes const val)
+{
+	return bool(ApplyShapes_t(val));
+}
+
+////////////////////////////////////////////////////////////////////////
+
+std::vector<PowerSpectrum::Job_Hl::shapePtr_t> PowerSpectrum::Job_Hl::CloneShapes
+	(std::vector<shapePtr_t> const& shapeVec, size_t const begin, size_t const size)
+{
+	std::vector<shapePtr_t> clones;
+	
+	if(size)
 	{
-		size_t const lMax = job->lMax; // Tell compiler that this is a constant
-		bool const symmetric = (job->left == job->right); // A symmetric outer-product
+		std::map<shapePtr_t, shapePtr_t> cloneMap;
 		
-		// Each tile adds to this, so we must zero-initialize
-		std::vector<real_t> hl_partial(lMax, real_t(0));
+		// First collect all unique shapes by using cloneMap as a std::set
+		// (mapping each unique key to the nullptr placeholder)
+		for(size_t i = 0; i < size; ++i)
+			cloneMap[shapeVec.at(begin + i)] = shapePtr_t(nullptr);
 		
-		TileSpecs tile;
-		size_t tileCount = 0; // How many tiles do we calculate
+		// Now map all unique shapes to clones
+		for(auto shape_it = cloneMap.begin(); shape_it not_eq cloneMap.end(); ++shape_it)
+			shape_it->second = shape_it->first->Clone();
+			
+		if(cloneMap.size() > 1) // We replicate cols->shapeVec with the clones. 
+		{
+			// Use at() as sanity check, because it throws an exception if the pointer is not found
+			for(size_t i = 0; i < size; ++i)
+				clones.push_back(cloneMap.at(shapeVec.at(begin + i)));
+		}
+		else // Otherwise there is only one unique shape, and it's the only one we need.
+			clones.push_back(cloneMap.begin()->second);
+	}
+	return clones;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void PowerSpectrum::Job_Hl::DoTiles()
+{
+	using shapePtr_t = std::shared_ptr<ShapeFunction>;
+	using namespace TiledOuter;
+	
+	// Each tile adds to this, so we must zero-initialize
+	std::vector<real_t> hl_partial(lMax, real_t(0));
+	
+	size_t tileCount = 0; // How many tiles do we calculate?
+	{
+		RecursiveLegendre_Increment<array_t> Pl_computer;
+		array_t fProd; // f_i * f_j (not l-dependent)
+		array_t Hl_accumulate; // Where we accumulate the partial Hl for each tile
 		
-		// Get the index of our next tile. When GetTile() returns false,
-		// there are no more tiles to analyze in this job
-		while(job->GetTile(tile))
+		// The values of hl for each row and column (to be filled inside the l-loop)
+		std::array<real_t, tileWidth> rowShape_l, colShape_l;
+		
+		bool const symmetric = (rows == cols); // Is the outer-product symmetric?
+		TileSpecs* tile; // We request tiles from NextTile() and store them here
+		
+		while((tile = NextTile())) // NextTile() returns nullptr when they're gone
 		{
 			++tileCount;
 			
-			// Development assertions
+			///////////////////////////////////////////////////////////////
+			// Prepare for dealing with shape functions before the l-loop
+			///////////////////////////////////////////////////////////////
+						
+			// Clone replicas of row->shapeVec
+			std::vector<shapePtr_t> const rowShape = CloneShapes(rows->shapeVec, 
+				tile->row_beg, tile->num_rows);
 			
-			// No width should exceed tileWidth
-			assert(tile.row_width <= tileWidth);
-			assert(tile.col_width <= tileWidth);
-			// Unless it's the FINAL tile, the row should always be full of columns.
-			if(tile.col_width < tileWidth) assert(tile.type == TileType::FINAL);
-			// We should only get a RIGHT edge for asymmetric outer products
-			if(tile.type == TileType::RIGHT)	assert(not symmetric);
-			if(symmetric and (tile.type == TileType::DIAGONAL))
+			// A diagonal tile (which only exists in symmetric outer-products)
+			// has the same shape in both rows and cols, so colShape is redundant. 
+			// In this case, we don't waste time copying; leave it empty as a signal
+			std::vector<shapePtr_t> const colShape = 
+				(symmetric and tile->isDiagonal()) ? std::vector<shapePtr_t>() : 
+					// Otherwise clone cols->shapeVec
+					CloneShapes(cols->shapeVec, tile->col_beg, tile->num_cols);
+			
+			// Now that we know what shapes we have, we can determine
+			// when they will be applied to Hl; before or after accumulation.
+			ApplyShapes const applyShapes = [&]()
 			{
-				assert(tile.row_beg == tile.col_beg);
-				assert(tile.row_width = tile.col_width);
-			}
-			
-			/* In general, "left" supplies the rows and "right" the columns.
-			 * For the RIGHT edge of the asymmetric product, 
-			 * the columns are full but the rows are not.
-			 * This creates an SIMD problem, because the vectorized loop 
-			 * is the inner/column loop, which is now not full.
-			 * We can fix this problem by redefining which vector supplies rows and columns.
-			 * This is simpler than creating a separate loop for RIGHT tiles, 
-			 * with its own control logic.
-			 * WARNING: We assume that this transposition was anticipated 
-			 * when the tile was defined, so that row/col beg/width were already swapped.
-			 * Since left/right are not kept in tileSpecs, we must swap them here.
-			*/ 
-			ShapedParticleContainer const* const rows = (tile.type == TileType::RIGHT) ? job->right : job->left;
-			ShapedParticleContainer const* const cols = (tile.type == TileType::RIGHT) ? job->left : job->right;
-			
-			/* ShapeParticleContainer.shapeVec is a vector of pointers to shape functions.
-			 * If all the particles use the same shape function, it is the same pointer over and over.
-			 * This is beneficial because ShapeFunction.hl operates recursively, 
-			 * and remembers its last value. So the first time hl(10) is called, 
-			 * math is done, but the second time hl(10) is called, we look up the cached value.
-			 * But since ShapeFunction's are not thread-safe, we must clone any we intend to use.
-			 * But if we have repeated pointers in shapeVec, a simple cloning 
-			 * will create a unique clone each time. We therefore use a std::map 
-			 * to map unique shapes to unqiue clones.
-			*/ 
-			
-			// Cloned replicas of row->shapeVec and col->shapeVec
-			std::vector<shapePtr_t> colShape, rowShape;
-			
-			{
-				// Map the original column shapes to clones
-				std::map<shapePtr_t, shapePtr_t> cloneMap;
+				// An empty colShape indicates a diagonal tile,
+				// so the columns have the same shape as the rows. 			
+				if(colShape.empty())
+				   // IF: there is only one member of rowShape, it means that
+				   // all rows have the same shape (and per colShape, all the columns)
+				   return ((rowShape.size() == 1) ? 
+						// THEN the shape can be applied after the accumulation
+						ApplyShapes::after : 
+						ApplyShapes::bothBefore); // ELSE we must apply each row before
 				
-				// First collect all unique shapes by using cloneMap as a std::set
-				// (mapping each unique key to the nullptr placeholder)
-				for(size_t j = 0; j < tile.col_width; ++j)
-					cloneMap[cols->shapeVec.at(tile.col_beg + j)] = shapePtr_t(nullptr);
-				
-				// Now map all unique shapes to clones
-				for(auto shape_it = cloneMap.begin(); shape_it not_eq cloneMap.end(); ++shape_it)
-					shape_it->second = shape_it->first->Clone();
-					
-				if(cloneMap.size() > 1) // We replicate cols->shapeVec with the clones. 
-				{
-					// Use at() as sanity check, because it throws an exception if the pointer is not found
-					for(size_t j = 0; j < tile.col_width; ++j)
-						colShape.push_back(cloneMap.at(cols->shapeVec.at(tile.col_beg + j)));
-				}
-				else // Otherwise there is only one unique shape, and it's the only one we need.
-					colShape.push_back(cloneMap.begin()->second);
-			}
+				// Otherwise, we apply the same IF-THEN_ELSE logic as above, 
+				// to rows and columns separately, then construct a bit flag.
+				return BitOr(
+					((rowShape.size() == 1) ? 
+						ApplyShapes::after : ApplyShapes::rowsBefore),
+					((colShape.size() == 1) ? 
+						ApplyShapes::after : ApplyShapes::colsBefore ));
+			}();
 			
-			// If every column uses the same shape, we only need colShape.front()
-			bool const colShapeInhomogeneous = (colShape.size() == tile.col_width);
-			
-			if(symmetric and (tile.type == TileType::DIAGONAL))
-				rowShape = colShape; // Rows are the same as columns, so shapes are the same
-			else
-			{
-				// We do pretty much the same thing as the previous, colShape scope
-				std::map<shapePtr_t, shapePtr_t> cloneMap;
-				
-				for(size_t i = 0; i < tile.row_width; ++i)
-					cloneMap[rows->shapeVec.at(tile.row_beg + i)] = shapePtr_t(nullptr);
-				
-				for(auto shape_it = cloneMap.begin(); shape_it not_eq cloneMap.end(); ++shape_it)
-					shape_it->second = shape_it->first->Clone();
-					
-				if(cloneMap.size() > 1)
-				{
-					for(size_t i = 0; i < tile.row_width; ++i)
-						rowShape.push_back(cloneMap.at(rows->shapeVec.at(tile.row_beg + i)));
-				}
-				else
-					rowShape.push_back(cloneMap.begin()->second);
-			}
-			bool const rowShapeInhomogeneous = (rowShape.size() == tile.row_width);
-			
-			/* If all the rows share the same shape, and all the columns have the same shape: 
-			 * 	H_l = h_l^{row} * h_l^{col} * <f_row| P_l( |p_row> <p_col| ) |f_col>
-			 * In this case, we can multiply the shape after the accumulating Hl_accumulate 
-			 * (which uses less FLOPS). Otherwise, we must multiply shape before we accumulate.
-			*/
-			bool const shapeBeforeAccumulate = ((rowShape.size() > 1) or colShapeInhomogeneous);
-			
+			// When we will the shape, we will need a controlling tile.
+			// The sources will be local arrays rowShape_l and colShape_l, 
+			// so we reset row/col_beg.
+			TileSpecs const shapeTile(0, tile->num_rows, 0, tile->num_cols);
+						
 			///////////////////////////////////////////////////////////////
 			// Prepare for the l-loop by calculating inter-particle weights and dot-products
-			
-			/* To efficiently calculating a small, symmetric outer product
-			 * (i.e. Hl_Jet for N=3 jets), the last tile of a symmetric outer is "ragged".
-			 * This means that we only calculate the lower half and diagonal.
-			 * Doing this creates a *small* (2%) speed hit for large outer products, 
-			 * but it is definitely worth it (50% faster) for very small outer products.
-			 * As N approaches tileWidth, ragged tiles are definitely slower,
-			 * so we only use the ragged tile when less than half the tile is full.
-			*/ 
-			bool const ragged = (symmetric and (tile.type == TileType::FINAL))
-				and (tile.row_width < (tileWidth / 2));
-			if(ragged) assert(tile.row_width == tile.col_width); // symmetry sanity check
-			
-			// Edge/Final tiles do not fill the entire increment, 
-			// so we restrict the inner-product inside the l-loop to only cover the filled portion
-			// (with zero-filled alignment buffer).
-			size_t const k_max = tileWidth * (ragged ?
-				kdp::MinPartitions(kdp::GaussSum(tile.row_width), tileWidth): 
-				tile.row_width);
-			
-			// Similarly, we only want to sum up the filled portion of Hl_accumulate.
-			// However, because BinaryAccumulate must start with a power-of-2 size, 
-			// we start with the smallest power-of-2 which covers the filled portion.
-			size_t const sumSize = kdp::IsPowerOfTwo(k_max) ? k_max : 
-				2 * kdp::LargestBit(k_max);
-			assert(sumSize <= incrementSize);
+			///////////////////////////////////////////////////////////////
 			
 			// Zero out the working arrays. Only necessary once per tile because 
 			// each tile will fill these arrays the same way at every l in the l-loop,
-			// so any necessary zero-buffer will remain zero.
+			// so any zero-buffer will remain zero.
 			Pl_computer.z.fill(real_t(0));
 			fProd.fill(real_t(0));
 			Hl_accumulate.fill(real_t(0));
-			colShapeVal.fill(real_t(0));
-				
-			/* Fill fProd:
-			 * Only FINAL tiles have partially full rows, so we can hard-code
-			 * tileWidth as the j-loop end-condition for non-FINAL tiles.
-			 * Symmetry factors accounting for un-computed tiles are also applied here
-			 * (to double the contribution from off-diaonal tiles, simply double their f).
-			 * Testing reveals that three loops is actually noticeably faster,
-			 * which motivates the less readable code.
-			*/			
-			if(tile.type == TileType::FINAL)
-			{
-				if(ragged)
-				{
-					size_t k = 0;
-					
-					for(size_t i = 0; i < tile.row_width; ++i)
-					{
-						for(size_t j = 0; j <= i; ++j)
-						{
-							// Only off-diagonal elements need doubling
-							real_t const symmetry = (j == i) ? real_t(1) : real_t(2);
-							
-							fProd[k++] = symmetry * 
-								(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
-						}
-					}
-					
-					// Development assertions
-					assert(k == kdp::GaussSum(tile.row_width));
-					assert(k <= k_max);
-				}
-				else
-				{
-					for(size_t i = 0; i < tile.row_width; ++i)
-						for(size_t j = 0 ; j < tile.col_width; ++j)
-							fProd[i * tileWidth + j] = 
-								(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
-				}			
-			}
-			else
-			{
-				// For symmetric outer products, it is faster to use 
-				// DIAGONAL tiles which are full; they are the only tiles here which don't need doubling.
-				
-				real_t const symmetry = (symmetric and (tile.type not_eq TileType::DIAGONAL)) ? 
-					real_t(2) : real_t(1);
-				
-				for(size_t i = 0; i < tile.row_width; ++i)
-					for(size_t j = 0 ; j < tileWidth; ++j) // Hard-code tileWidth for speed
-						fProd[i * tileWidth + j] = symmetry * 
-							(rows->f[tile.row_beg + i] * cols->f[tile.col_beg + j]);
-			}
+			rowShape_l.fill(real_t(0));
+			colShape_l.fill(real_t(0));
 			
-			// Fill pDot with the dot product of the 3-vectors:
-			// Testing reveals that it is faster to do x, y, and z in separate loops
-			// (since this caches all of x, then all of y, then all of z)
-			// Testing also shows that 3 versions is faster, 
-			// even though it makes a terrible mess of the code.
-			{
-				array_t& pDot = Pl_computer.z;
+			// We store how long the altered region is (fill.size), 
+			// and whether the fill is ragged (fill.ragged).
+			// All other tiles will be tilled like fProd (since they all share 
+			// the same TileSpecs), so we only need to store the TileFill once.
+			TileFill const fill = symmetric ? 
+				FillTile_Symmetric<Equals>(fProd, *tile, rows->f) : 
+				FillTile<Equals>(fProd, *tile, rows->f, cols->f);
 				
-				if(tile.type == TileType::FINAL)
-				{
-					if(ragged)
-					{
-						size_t k = 0;
-						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0; j <= i; ++j)
-								pDot[k++] = rows->x[tile.row_beg + i] * cols->x[tile.col_beg + j];
-								
-						k = 0;
-						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0; j <= i; ++j)
-								pDot[k++] += rows->y[tile.row_beg + i] * cols->y[tile.col_beg + j];
-						
-						k = 0;
-						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0; j <= i; ++j)
-								pDot[k++] += rows->z[tile.row_beg + i] * cols->z[tile.col_beg + j];
-					}
-					else
-					{
-						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0 ; j < tile.col_width; ++j)
-								pDot[i * tileWidth + j] = 
-									rows->x[tile.row_beg + i] * cols->x[tile.col_beg + j];
-									
-						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0 ; j < tile.col_width; ++j)
-								pDot[i * tileWidth + j] += 
-									rows->y[tile.row_beg + i] * cols->y[tile.col_beg + j];
-									
-						for(size_t i = 0; i < tile.row_width; ++i)
-							for(size_t j = 0 ; j < tile.col_width; ++j)
-								pDot[i * tileWidth + j] += 
-									rows->z[tile.row_beg + i] * cols->z[tile.col_beg + j];
-					}
-				}
-				else
-				{
-					for(size_t i = 0; i < tile.row_width; ++i)
-						for(size_t j = 0 ; j < tileWidth; ++j) // Hard-code tileWidth for speed
-							pDot[i * tileWidth + j] = 
-								rows->x[tile.row_beg + i] * cols->x[tile.col_beg + j];
-								
-					for(size_t i = 0; i < tile.row_width; ++i)
-						for(size_t j = 0 ; j < tileWidth; ++j)
-							pDot[i * tileWidth + j] += 
-								rows->y[tile.row_beg + i] * cols->y[tile.col_beg + j];
-								
-					for(size_t i = 0; i < tile.row_width; ++i)
-						for(size_t j = 0 ; j < tileWidth; ++j)
-							pDot[i * tileWidth + j] += 
-								rows->z[tile.row_beg + i] * cols->z[tile.col_beg + j];
-				}
-			}
+			// For symmetric tiles, the symmetry factor should only be applied
+			// once, and has already been applied to fProd. 
+			// Thus, p^_i . p^_j proceeds via the normal FillTile, regardless of symmetry.
+			FillTile<Equals>(Pl_computer.z, *tile, rows->x, cols->x);
+			FillTile<PlusEquals>(Pl_computer.z, *tile, rows->y, cols->y);
+			FillTile<PlusEquals>(Pl_computer.z, *tile, rows->z, cols->z);
 			
-			// Prepare to iterate
-			Pl_computer.Reset(k_max);
+			// (fill.size) tells us the size of fProd and Pl_computer.z which are altered, 
+			// and we this size will limit the inner product when we fill Hl_accumulate.
+			// Similarly, we only want to sum up the filled portion of Hl_accumulate.
+			// However, because BinaryAccumulate must start with a power-of-2 size, 
+			// we start with the smallest power-of-2 which covers the filled portion.
+			size_t const sumSize = kdp::IsPowerOfTwo(fill.size) ? fill.size : 
+				2 * kdp::LargestBit(fill.size);
+			assert(sumSize <= TileSpecs::incrementSize);
+			assert(sumSize >= fill.size);			
+			
+			// Prepare to iterate (telling Pl_computer that we only need to
+			// update the filled region of Pl_computer.z).
+			Pl_computer.Reset(fill.size);
 			
 			for(size_t l = 1; l <= lMax; ++l)
 			{
@@ -953,79 +653,525 @@ void PowerSpectrum::Hl_Thread()
 					Pl_computer.Next();
 				assert(Pl_computer.l() == l);
 				
-				// Do the original calculation for delta-distribution particles
-				for(size_t k = 0; k < k_max; ++k)
+				// Do the calculation for delta-distribution particles
+				for(size_t k = 0; k < fill.size; ++k)
 					Hl_accumulate[k] = Pl_computer.P_l()[k] * fProd[k];
 				
-				// Do we need to handle shape before we accumulate?
-				if(shapeBeforeAccumulate)
+				////////////////////////////////////////////////////////////
+				// Multiply Hl_accumulate by particle shape
+				////////////////////////////////////////////////////////////
+				
+				// First cache the numerical values of row and column shapes
+				
+				if(IsBefore(BitAnd(applyShapes, ApplyShapes::rowsBefore)))
 				{
-					// If columns have different shapes, cache the value of each shape function.
-					// Redundant calls to repeated shapes are still somewhat efficient,
-					// as the cached value is returned (instead of recalculating).
-					if(colShapeInhomogeneous)
-					{
-						for(size_t j = 0; j < tile.col_width; ++j)
-							colShapeVal[j] = colShape[j]->hl(l);
-					}
-					else
-						colShapeVal.fill(colShape.front()->hl(l)); // All the same shape, fill
+					for(size_t i = 0; i < rowShape.size(); ++i)
+						rowShape_l[i] = rowShape[i]->hl(l);
+				}
+				
+				if(IsBefore(BitAnd(applyShapes, ApplyShapes::colsBefore)))
+				{
+					// colShape may be empty if a diagonal tile, but this loop is safe
+					for(size_t j = 0; j < colShape.size(); ++j)
+						colShape_l[j] = colShape[j]->hl(l);
+				}
+				
+				// Shapes multiply the existing Hl_accumulate
+				switch(applyShapes)
+				{
+					case ApplyShapes::bothBefore:
+						
+						if(colShape.empty()) // A diagonal tile
+							FillTile_Symmetric<TimesEquals>(Hl_accumulate, shapeTile, rowShape_l);
+						else
+							FillTile<TimesEquals>(Hl_accumulate, shapeTile, rowShape_l, colShape_l);
 					
-					// The row's h_l will be cached one at a time, since rows are the outer loop
-					if(ragged)
-					{
-						size_t k = 0;
-						for(size_t i = 0; i < tile.row_width; ++i)
-						{
-							real_t const rowShapeVal = 
-								(rowShapeInhomogeneous ? rowShape[i] : rowShape.front())->hl(l);
-							
-							for(size_t j = 0; j <= i; ++j)
-								Hl_accumulate[k++] *= rowShapeVal * colShapeVal[j];
-						}
+					break;
+					
+					case ApplyShapes::rowsBefore:						
+						FillTile_Rows<TimesEquals>(Hl_accumulate, shapeTile, rowShape_l, 
+							fill.isTriangular());
+					break;
+					
+					case ApplyShapes::colsBefore:
+						FillTile_Cols<TimesEquals>(Hl_accumulate, shapeTile, colShape_l, 
+							fill.isTriangular());
+					break;
+					
+					default: // Apply shapes after; nothing to do here
+					break;
+				}
+				
+				// Now that we've applied all before shapes, we can accumulate all the terms
+				real_t Hl_sum = kdp::BinaryAccumulate_Destructive(Hl_accumulate, sumSize);
+				
+				switch(applyShapes) // We must now apply any after shapes
+				{
+					case ApplyShapes::bothBefore: // Nothing to do, already done
+					break;
+					
+					case ApplyShapes::rowsBefore:
+						assert(colShape.size());
+						Hl_sum *= colShape.front()->hl(l);
+					break;
+					
+					case ApplyShapes::colsBefore:
+						assert(rowShape.size());
+						Hl_sum *= rowShape.front()->hl(l);
+					break;
+					
+					case ApplyShapes::after:
+						Hl_sum *= (colShape.empty() ? kdp::Squared(rowShape.front()->hl(l)) : 
+						rowShape.front()->hl(l) * colShape.front()->hl(l));
+					break;
+				}
+				
+				hl_partial[l - 1] += Hl_sum; // l = 0 is not stored
+			}// end l-loop
+		}// end NextTile loop
+	}// end array allocation
+			
+	// No more tiles; this thread is done doing major work.
+	// Since it has nothing better to do, use the thread to 
+	// add to Hl_total before requesting the next job.
+	Finalize_Thread(tileCount, hl_partial);
+}
+
+////////////////////////////////////////////////////////////////////////
+// Job_AngularResolution
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::Job_AngularResolution::TileSpecs::TileSpecs
+	(size_t const row_beg_in, size_t const num_rows_in,
+	size_t const col_beg_in, size_t const num_cols_in, 
+	TileType const type_in):
+Job::TileSpecs(row_beg_in, num_rows_in, col_beg_in, num_cols_in), 
+type(type_in) {}
+
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::AngleWeight::AngleWeight
+	(real_t const angle_in, real_t const weight_in):
+angle(angle_in), weight(weight_in) {}
+
+////////////////////////////////////////////////////////////////////////
+
+bool PowerSpectrum::AngleWeight::operator < (AngleWeight const& rhs) const
+{
+	return (this->angle < rhs.angle);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void PowerSpectrum::AngleWeight::ReSort
+	(std::vector<AngleWeight>& headTail, size_t const n_sorted)
+{
+	assert(n_sorted <= headTail.size());
+	std::sort(headTail.begin() + n_sorted, headTail.end());
+	
+	if(n_sorted > 0)
+		std::inplace_merge(headTail.begin(), headTail.begin() + n_sorted, headTail.end());
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void PowerSpectrum::Job_AngularResolution::Accumulate::operator()
+	(std::vector<AngleWeight>& angleWeight_partial)
+{
+	if(this->empty())
+		this->std::vector<AngleWeight>::operator=(std::move(angleWeight_partial));
+	else
+	{
+		size_t const initSize = this->size();
+		
+		this->insert(this->end(), angleWeight_partial.cbegin(), angleWeight_partial.cend());
+	
+		// We ASSUME that angleWeight_partial is already sorted
+		std::inplace_merge(this->begin(), this->begin() + initSize, this->end());
+	}
+};
+
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::Job_AngularResolution::Job_AngularResolution(DetectorObservation const& observation, 
+	real_t const fInner_scale, bool const xi_cut):
+towers(observation.towers), // verbatim copies, no normalization
+tracks(observation.tracks)
+{
+	if(std::fabs(observation.fTotal() - 1.) > 1e-8)
+		throw std::runtime_error("PowerSpectrum::AngularResolution: detector observation is not normalized.");
+	
+	// Integrating \int_0^thetaR dOmega = sin(thetaR/2)**2 = surfaceFraction
+	for(real_t const surfaceFraction : observation.towerAreas)
+		twrRadii.emplace_back(real_t(2)*std::asin(std::sqrt(surfaceFraction)));
+		
+	// If all towers share the same radii, simply copy that universal radii
+	// (this rote copying simplifies the logic of the thread loops)
+	if(twrRadii.size() < towers.size())
+		twrRadii.assign(towers.size(), twrRadii.at(0));
+	
+	if(xi_cut)
+	{
+		// Expected radius of Voronoi area: 1 / N = sin**(R/2) ==> R = 2 asin(1/sqrt(N));
+		// therefore, the expected inter-particle angle is 2R
+		real_t const xi_interParticle_expected = 
+			real_t(4)*std::asin(real_t(1)/std::sqrt(real_t(observation.size())));
+		
+		// Expand this expectation by the safety margin (ensure it doesn't get larger than pi)
+		xi_max = std::min(real_t(M_PI), angleMargin * xi_interParticle_expected);
+		cosXi_min = std::cos(xi_max);
+	}
+	else
+	{
+		/* If we don't want a cut on angle, then we proceed in two stages;
+		 * (i) intra-particle angles (cosXi = 1) will be mapped to cosXi = -100.
+		 * We want to exclude these angles (which is why we must use cosXi > cosXi_min).
+		 * After angles are made extensive, we don't want to exclude any,
+		 * so we use a non-sensical maximum.
+		*/  
+		cosXi_min = real_t(-2);
+		xi_max = real_t(INFINITY);
+	}
+	
+	/////////////////////////////////////////////////////////////////////
+	// Partition the outer products
+	
+	// TrackTrack
+	tileVec = TileSpecs::Partition_Symmetric_ptr<TileSpecs>(tracks.size(), 
+		TileType::TrackTrack);
+	
+	// TrackTower
+	{
+		// For track-tower, put towers in the rows; this ensures that 
+		// we iterate over tower radius in the outer (row) loop.
+		auto newTiles = TileSpecs::Partition_ptr<TileSpecs>(towers.size(), tracks.size(),
+			TileType::TowerTrack);
+			
+		// We have to move the newTiles because they are unique_ptr (move-only).
+		// std::back_inserter returns an OutputIterator that can insert 
+		// new elements at the end of the container (via push_back, c.f. 
+		// most OutputIterators cam simply overwrite existing elements). 
+		std::move(newTiles.begin(), newTiles.end(), std::back_inserter(tileVec));
+		
+		// Alternatively, we could resize tileVec, then pass the last valid iterator
+		// NOTE: reserving won't work because the vector size must change
+		//~ size_t const size_existing = tileVec.size();
+		//~ tileVec.resize(size_existing + newTiles.size());
+		//~ std::move(newTiles.begin(), newTiles.end(), tileVec.begin() + size_existing);
+	}
+	
+	// TowerTower
+	{
+		auto newTiles = TileSpecs::Partition_Symmetric_ptr<TileSpecs>(towers.size(), 
+			TileType::TowerTower);
+			
+		std::move(newTiles.begin(), newTiles.end(), std::back_inserter(tileVec));
+	}
+	
+	/////////////////////////////////////////////////////////////////////
+	remainingTiles = tileVec.size();
+	weight_target = fInner_scale * (towers.fInner() + tracks.fInner());
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void PowerSpectrum::Job_AngularResolution::DoTiles()
+{
+	using namespace TiledOuter;
+	
+	// The dot product of unit vectors must exist in [-1, 1]
+	real_t constexpr badDot = real_t(-100);
+	
+	std::vector<AngleWeight> angleWeight_sorted;	
+	size_t tileCount = 0; // How many tiles do we calculate?
+	{
+		array_t weight; // f_i * f_j (not l-dependent)
+		array_t cosXi; // p^_i . p^_j
+		
+		real_t totalWeight = real_t(0);
+		size_t n_sorted = 0;
+		TileSpecs* tile; // We request tiles from NextTile() and store them here
+		
+		// Cast from Job::TileSpecs to Job_AngularResolution::TileSpecs;
+		// NextTile() returns nullptr when the tiles are all gone
+		while((tile = static_cast<TileSpecs*>(NextTile())))
+		{
+			++tileCount;
+			
+			// Zero out the working arrays (because all elements may not be filled).
+			weight.fill(real_t(0)); // zero weight cannot alter angular resolution
+			cosXi.fill(badDot); // zero IS a valid dot product, so fill to nonsense
+			
+												GCC_IGNORE_PUSH(-Wreturn-type) // switch covers all options, return guaranteed
+			// We store how long the altered region is (fill.size), 
+			// and whether the fill is ragged (fill.ragged).
+			// All other arrays will be tilled like weight (since they all share 
+			// the same TileSpecs), so we only need to store the TileFill once.
+			// For symmetric tiles (TrackTrack and TowerTower), 
+			// the symmetry factor should only be applied once (to weight). 
+			// Thus, p^_i . p^_j proceeds via the normal FillTile, regardless of symmetry.
+			TileFill const fill = [&]()
+			{
+				switch(tile->type)
+				{
+					case TileType::TrackTrack:
+						
+						FillTile<Equals>(		cosXi, *tile, tracks.x, tracks.x);
+						FillTile<PlusEquals>(cosXi, *tile, tracks.y, tracks.y);
+						FillTile<PlusEquals>(cosXi, *tile, tracks.z, tracks.z);
+						
+						return FillTile_Symmetric<Equals>(weight, *tile, tracks.f);
+					break;
+					
+					case TileType::TowerTrack:
+					{						
+						FillTile<Equals>(		cosXi, *tile, towers.x, tracks.x);
+						FillTile<PlusEquals>(cosXi, *tile, towers.y, tracks.y);
+						FillTile<PlusEquals>(cosXi, *tile, towers.z, tracks.z);
+						
+						auto const thisFill = FillTile<Equals>(weight, *tile, towers.f, tracks.f);
+						
+						for(size_t k = 0; k < thisFill.size; ++k)
+							weight[k] *= real_t(2); // This whole matrix appears twice
+					
+						return thisFill;
 					}
-					else
+					break;
+					
+					case TileType::TowerTower:
+						
+						FillTile<Equals>(		cosXi, *tile, towers.x, towers.x);
+						FillTile<PlusEquals>(cosXi, *tile, towers.y, towers.y);
+						FillTile<PlusEquals>(cosXi, *tile, towers.z, towers.z);
+						
+						return FillTile_Symmetric<Equals>(weight, *tile, towers.f);
+					break;
+				}
+			}();								GCC_IGNORE_POP
+			
+			if(fill.isTriangular())
+			{
+				size_t k = 0;
+				
+				for(size_t i = 0; i < tile->num_rows; ++i)
+				{
+					for(size_t j = 0; j < i; ++j) // Only off-diagonal elements
 					{
-						for(size_t i = 0; i < tile.row_width; ++i)
+						if(cosXi[k] > cosXi_min)
 						{
-							real_t const rowShapeVal = 
-								(rowShapeInhomogeneous ? rowShape[i] : rowShape.front())->hl(l);
+							totalWeight += NewAngle(angleWeight_sorted, 
+								cosXi[k], weight[k], 
+								tile->row_beg + i, tile->col_beg + j, tile->type);
+						}
+						++k;
+					}
+					++k; // Skip the diagonal element
+				}
+				assert(k == kdp::GaussSum(tile->num_rows));
+			}
+			else
+			{
+				// 1. If diagonal, zero out the diagonal (simplifies logic of next loop)				
+				if((tile->type not_eq TileType::TowerTrack) // symmetric
+					and tile->isDiagonal()) // diagonal
+				{
+					assert(tile->num_cols == tile->num_rows);
+					
+					// RowMajor and ColMajor both use this loop
+					for(size_t i = 0; i < tile->num_rows; ++i)
+						cosXi[i * TileSpecs::tileWidth + i] = badDot;
+				}
+				
+				// 2. Check for small angles				
+				if(fill.pattern == TileFill::DataPattern::ColMajor)
+				{
+					for(size_t j = 0; j < tile->num_cols; ++j)
+					{
+						for(size_t i = 0; i < TileSpecs::tileWidth; ++i)
+						{
+							size_t const k = j * TileSpecs::tileWidth + i;
 							
-							/* Wait! If this is a final tile, it's row may not be full!
-							 * Doesn't matter, we *= garbage into something 
-							 * which is already zero (because fProd is zero there).
-							 * Hardcoding tileWidth  is faster because MOST tiles are full,
-							 * and this solution creates less branches overall.
-							*/ 
-							for(size_t j = 0 ; j < tile.col_width; ++j)
+							if(cosXi[k] > cosXi_min)
 							{
-								Hl_accumulate[i * tileWidth + j] *= rowShapeVal * colShapeVal[j];
-								
-																					//~ GCC_IGNORE_PUSH(-Wfloat-equal)
-								//~ if(j >= tile.col_width) // Check that assumption
-									//~ assert(Hl_accumulate[i * tileWidth + j] == real_t(0));
-																					//~ GCC_IGNORE_POP
+								// The raw angle is a candidate; make extensive and
+								// append to angleWeight_sorted IFF the extensive angle is 
+								// smaller than xi_min; return weight if accepted (0 if rejected).
+								totalWeight += NewAngle(angleWeight_sorted, 
+									cosXi[k], weight[k],
+									tile->row_beg + i, tile->col_beg + j, tile->type);
 							}
 						}
 					}
 				}
-				
-				// Now that we've applied shape, we can accumulate all the terms
-				real_t Hl_sum = kdp::BinaryAccumulate_Destructive(Hl_accumulate, sumSize);
-				
-				// If we didn't handle shape yet, now is the time
-				if(not shapeBeforeAccumulate)
-					Hl_sum *= rowShape.front()->hl(l) * colShape.front()->hl(l);
-				
-				hl_partial[l - 1] += Hl_sum; // l = 0 is not stored
-			}// end l-loop
-		}
+				else
+				{
+					for(size_t i = 0; i < tile->num_rows; ++i)
+					{
+						for(size_t j = 0; j < tile->num_cols; ++j)
+						{
+							size_t const k = i * TileSpecs::tileWidth + j;
+							
+							if(cosXi[k] > cosXi_min)
+							{
+								// The raw angle is a candidate; make extensive and
+								// append to angleWeight_sorted IFF the extensive angle is 
+								// smaller than xi_min; return weight if accepted (0 if rejected).
+								totalWeight += NewAngle(angleWeight_sorted, 
+									cosXi[k], weight[k],
+									tile->row_beg + i, tile->col_beg + j, tile->type);
+							}
+						}
+					}
+				}
+			}
 			
-		// No more tiles; this thread is done doing major work.
-		// Since it has nothing better to do, use the thread to 
-		// add to Hl_total before requesting the next job.
-		job->Add_Hl(hl_partial, tileCount);
+			AngleWeight::ReSort(angleWeight_sorted, n_sorted); // Sort the tail and merge
+			
+			if(totalWeight > real_t(2) * weight_target)
+				totalWeight -= StripTailWeight(angleWeight_sorted, totalWeight);
+			
+			n_sorted = angleWeight_sorted.size();
+		}
+		
+		if(totalWeight > weight_target)
+			StripTailWeight(angleWeight_sorted, totalWeight);
 	}
+	Finalize_Thread(tileCount, angleWeight_sorted);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::real_t PowerSpectrum::Job_AngularResolution::NewAngle
+	(std::vector<AngleWeight>& angleWeight_sorted,
+	real_t const cosXi, real_t const weight,
+	size_t const i_abs, size_t const j_abs, TileType const type) const
+{
+	assert(cosXi < real_t(1));
+	assert((real_t(-1) - cosXi) < 1e-8);
+			
+	real_t xi = std::acos(std::max(cosXi, real_t(-1)));
+	
+	switch(type)
+	{
+		case TileType::TrackTrack:				
+			// No smearing between well-measured tracks
+		break;
+		
+		case TileType::TowerTrack:
+		{	
+			real_t const R = twrRadii[i_abs];
+			xi = R * SmearedDistance_TrackTower(xi/R);
+		}	
+		break;
+		
+		case TileType::TowerTower:
+		{
+			real_t const R = std::hypot(twrRadii[i_abs], twrRadii[j_abs]);
+			xi = R * SmearedDistance_TowerTower(xi/R);
+		}
+		break;
+	}
+	
+	if(xi < xi_max)
+	{
+		angleWeight_sorted.emplace_back(xi, weight);
+		
+		return weight;
+	}
+	else return real_t(0);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::real_t PowerSpectrum::Job_AngularResolution::StripTailWeight
+	(std::vector<AngleWeight>& angleWeight_sorted, real_t const totalWeight) const
+{
+	real_t tailWeight = real_t(0);
+	
+	{
+		real_t const overShoot = totalWeight - weight_target;
+		auto it_angle = angleWeight_sorted.rbegin(); // start from the back
+		
+		for(;((it_angle not_eq angleWeight_sorted.rend()) and (tailWeight < overShoot)); ++it_angle)
+			tailWeight += it_angle->weight;
+		
+		// We want totalWeight ~= weight_target, but also totalWeight > weight_target
+		// So if tailWeight > overShoot, we trimmed off one too many; decrement once.
+		if(tailWeight > overShoot) 
+		{
+			tailWeight -= (--it_angle)->weight;
+			assert(tailWeight >= real_t(0));
+		}
+		
+		angleWeight_sorted.resize(angleWeight_sorted.rend() - it_angle);
+	}
+	
+	return tailWeight;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+void PowerSpectrum::Job_AngularResolution::Finalize_Thread(size_t const numTiles, 
+	std::vector<AngleWeight>& angleWeight_sorted)
+{
+	Job::Finalize_Thread(numTiles, angleWeight_final, angleWeight_sorted);
+}
+
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::real_t PowerSpectrum::Job_AngularResolution::Get_AngularResolution()
+{
+	WaitTillDone();
+	
+	assert(std::is_sorted(angleWeight_final.cbegin(), angleWeight_final.cend()));
+		
+	// We use the geometric mean because it averages over scales
+	real_t geoMean = real_t(0);
+	real_t weight = real_t(0);
+	
+	/* Add up the smallest angles until their collective weight 
+	 * exceeds some weight target (as a function of <f|f>, the approximate
+	 * height of the power spectrum's asymptotic plateau). */
+	size_t i = 0;
+			
+	for(; (i < angleWeight_final.size()) and (weight < weight_target); ++i)
+	{
+		assert(angleWeight_final[i].angle > real_t(0));
+		
+		real_t const thisWeight = std::min(angleWeight_final[i].weight, weight_target - weight);
+		
+		geoMean += thisWeight * std::log(angleWeight_final[i].angle);
+		weight += thisWeight;
+		
+		//~ printf("new: %.3e %.3e\n", angleWeight_final[i].angle, thisWeight);
+		
+		if(thisWeight < angleWeight_final[i].weight)
+		{
+			assert(kdp::AbsRelError(weight_target, weight) < 1e-8);
+			break;
+		}
+	}
+	
+	// The loop aborted before we reached our weight target;
+	// try again (provided there was a cut on angle)
+	if((i == angleWeight_final.size()) and (xi_max < real_t(INFINITY)))
+		return real_t(-1);
+	else
+		return std::exp(geoMean / weight);
+}
+
+////////////////////////////////////////////////////////////////////////
+//  PowerSpectrum
+////////////////////////////////////////////////////////////////////////
+		
+void PowerSpectrum::Thread()
+{
+	std::shared_ptr<Job> job;
+	
+	// Request jobs; Dispatch() will block until there are jobs, 
+	// and return nullptr when it's time to die (exit the loop and return)
+	while((job = Dispatch()))
+		job->DoTiles();
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -1079,7 +1225,7 @@ PowerSpectrum::PowerSpectrum(size_t const numThreads):
 	// Populate the thread pool.
 	// They will immediately find no work to do, and will await notification.
 	for(size_t t = 0; t < numThreads; ++t)
-		threadPool.emplace_back(&PowerSpectrum::Hl_Thread, this);
+		threadPool.emplace_back(&PowerSpectrum::Thread, this);
 }
 
 ////////////////////////////////////////////////////////////////////////'
@@ -1103,12 +1249,113 @@ PowerSpectrum::~PowerSpectrum()
 		threadPool[t].join();
 }
 
+////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::real_t PowerSpectrum::AngularResolution_Slow(DetectorObservation const& observation,
+	real_t const ff_fraction)
+{
+	observation.CheckValidity_TowerArea();
+	
+	if(std::fabs(1. - observation.fTotal()) > 1e-8)
+		throw std::runtime_error("PowerJects::AngularResolution_Slow: ensemble not normalized");
+	
+	if(observation.size() < 2)
+	{
+		return INFINITY;
+	}
+	else
+	{
+		std::vector<real_t> twrRadii;
+		
+		// Integrating \int_0^thetaR dOmega = 
+		// 2 pi (1-cos(thetaR)) = Omega ==> sin(thetaR/2)**2 = surfaceFraction
+		for(real_t const surfaceFraction : observation.towerAreas)
+			twrRadii.emplace_back(real_t(2)*std::asin(std::sqrt(surfaceFraction)));
+		
+		// If all towers share the same radii, simply copy that universal radii
+		// (this rote copying simplifies the logic of the inner loop)
+		if(twrRadii.size() < observation.towers.size())
+			twrRadii.assign(observation.towers.size(), twrRadii.at(0));
+			
+		// Create a list of inter-particle angles and correlation weight = f_i * f_j
+		std::vector<AngleWeight> angleVec;
+		angleVec.reserve(kdp::GaussSum(observation.size() - 1));
+				
+		// Find the exact angular resolution (memory intensive)		
+		for(auto trk = observation.tracks.cbegin(); trk not_eq observation.tracks.cend(); ++trk)
+		{
+			// We only calculate the lower-half of the symmetric inter-particle matrix
+			for(auto trk_other = observation.tracks.cbegin(); trk_other not_eq trk; ++trk_other)
+			{
+				angleVec.emplace_back(
+					// No smearing between tracks; assume very well measured
+					trk->pHat.InteriorAngle(trk_other->pHat),
+						trk->f * trk_other->f);
+			}
+			
+			for(size_t twr_i = 0; twr_i < observation.towers.size(); ++twr_i)
+			{
+				// We calculate the dimensionless smeared angle, then rescale it by the tower radius
+				angleVec.emplace_back(
+					twrRadii[twr_i] * SmearedDistance_TrackTower(
+						trk->pHat.InteriorAngle(observation.towers[twr_i].pHat)/twrRadii[twr_i]),
+					trk->f * observation.towers[twr_i].f);
+			}
+		}
+			
+		for(size_t twr_i = 0; twr_i < observation.towers.size(); ++twr_i)
+		{
+			// We only calculate the lower-half of the symmetric inter-particle matrix
+			for(size_t twr_j = 0; twr_j < twr_i; ++twr_j)
+			{
+				// For two towers, we use their shared radius
+				real_t const twoTowerRadius = std::hypot(twrRadii[twr_i], twrRadii[twr_j]);
+				
+				angleVec.emplace_back(
+					twoTowerRadius	* SmearedDistance_TowerTower(
+						observation.towers[twr_i].pHat.InteriorAngle(observation.towers[twr_j].pHat)/twoTowerRadius),
+					observation.towers[twr_i].f * observation.towers[twr_j].f);
+			}
+		}
+		
+		std::sort(angleVec.begin(), angleVec.end());
+		
+		/* Now we add up the smallest angles until their collective weight 
+		 * exceeds some weight target (as a function of <f|f>, the approximate
+		 * height of the power spectrum's asymptotic plateau).
+		 * We scale weight_target by 1/2 because each angle/weight appears 
+		 * twice in the full matrix, but we only calculated the lower half
+		*/ 
+		real_t const weight_target = 0.5 * ff_fraction * observation.fInner(); 
+		
+		// We use the geometric mean because it averages over scales
+		real_t geoMean = real_t(0);
+		real_t weight = real_t(0);
+		
+		for(size_t i = 0; (i < angleVec.size()) and (weight < weight_target); ++i)
+		{
+			real_t const thisWeight = std::min(angleVec[i].weight, weight_target - weight);
+			
+			geoMean += thisWeight * std::log(angleVec[i].angle);
+			weight += thisWeight;
+			
+			//~ printf("old: %.3e %.3e\n", angleVec[i].angle, 2.*thisWeight);
+			
+			if(thisWeight < angleVec[i].weight)
+			{
+				assert(kdp::AbsRelError(weight_target, weight) < 1e-8);
+				break;
+			}
+		}
+		
+		return std::exp(geoMean / weight);
+	}
+}
+
 ////////////////////////////////////////////////////////////////////////'
 		
-std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Job(
-	ShapedParticleContainer const* const left, 
-	ShapedParticleContainer const* const right, 
-	size_t const lMax)
+std::vector<PowerSpectrum::real_t> PowerSpectrum::Launch_Hl_Job(size_t const lMax,
+	ShapedParticleContainer const& left, ShapedParticleContainer const& right)
 {
 	// Synchronize the thread pool to check that keepAlive is true
 	std::unique_lock<std::mutex> threadSafe(threadSafe_lock);
@@ -1122,86 +1369,11 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Job(
 	threadSafe.unlock();
 		
 	// Return an empty vector if it's going to be empty anyway
-	if((lMax == 0) or (left->size() == 0) or (right->size() == 0))
+	if((lMax == 0) or (left.size() == 0) or (right.size() == 0))
 		return std::vector<real_t>();
 	else
 	{
-		std::vector<TileSpecs> tileVec;
-					
-		// There are two different tiling methods, depending on symmetric or asymmetric outer products.
-		// These can be combined into a single loop to make less code, 
-		// but then the code becomes less readable. No time is spent here,
-		// so we choose readability over compactness
-		if(left == right)
-		{
-			for(size_t i = 0; i < left->size(); i += tileWidth) // left is for the rows
-			{
-				// Detect the last row of tiles
-				TileType rowType_base = ((i + tileWidth) >= left->size()) ? 
-					TileType::BOTTOM : TileType::CENTRAL;
-				
-				// Only complete the lower-half of the outer product
-				for(size_t j = 0; j <= i; j += tileWidth)
-				{
-					size_t const row_width = (rowType_base == TileType::BOTTOM) ? 
-						left->size() - i : tileWidth;
-						
-					TileType type = rowType_base;
-					
-					// Detect a diagonal tile
-					if(i == j)
-					{
-						type = (rowType_base == TileType::BOTTOM) ? 
-							TileType::FINAL : TileType::DIAGONAL;
-					}
-					
-					// A rows are full of columns except the final tile
-					size_t const col_width = (type == TileType::FINAL) ? 
-						right->size() - j : tileWidth;
-						
-					tileVec.push_back(TileSpecs{i, row_width, j, col_width, type});
-				}
-			}
-		}
-		else
-		{
-			for(size_t i = 0; i < left->size(); i += tileWidth)
-			{
-				TileType rowType_base = ((i + tileWidth) >= left->size()) ? 
-					TileType::BOTTOM : TileType::CENTRAL;
-				
-				for(size_t j = 0; j < right->size(); j += tileWidth)
-				{
-					size_t const row_width = (rowType_base == TileType::BOTTOM) ? 
-						(left->size() - i) : tileWidth;
-						
-					TileType type = rowType_base;
-					
-					if((j + tileWidth) >= right->size())
-					{
-						type = (rowType_base == TileType::BOTTOM) ? 
-							TileType::FINAL : TileType::RIGHT;
-					}
-					
-					size_t const col_width = (type not_eq rowType_base) ? 
-						(right->size() - j) : tileWidth;
-						
-					if(type == TileType::RIGHT)
-					{
-						// Swap rows and columns so rows are full
-						tileVec.push_back(TileSpecs{j, col_width, i, row_width, type});
-						assert(tileVec.back().row_width == tileWidth);
-					}
-					else
-						tileVec.push_back(TileSpecs{i, row_width, j, col_width, type});
-				}
-			}
-		}
-		
-		// We should have already caught the three conditions that cause zero tiles
-		assert(tileVec.size() > 0);
-		
-		std::shared_ptr<Job> job = std::make_shared<Job>(left, right, lMax, std::move(tileVec));
+		std::shared_ptr<Job_Hl> job = std::make_shared<Job_Hl>(lMax, left, right);
 		
 		// Lock dispatch to add the job to the queue
 		{
@@ -1243,11 +1415,96 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Job(
 }
 
 ////////////////////////////////////////////////////////////////////////
+
+PowerSpectrum::real_t PowerSpectrum::AngularResolution(DetectorObservation const& observation, 
+	real_t const fInner_scale)
+{
+	// Synchronize the thread pool to check that keepAlive is true
+	std::unique_lock<std::mutex> threadSafe(threadSafe_lock);
+		
+	// By using a unique_lock, threadSafe will be unlocked when this exception is thrown
+	if(not keepAlive)
+		throw std::runtime_error("PowerSpectrum: this object is in the process of being deconstructed!");
 	
+	// The thread pool is now guaranteed to persist till after the job is complete
+	++activeJobs;
+	threadSafe.unlock();
+		
+	// Return a nonsense value if there are no particles
+	if(observation.size() == 0)
+		return INFINITY;
+	else
+	{
+		// true = cut on angle
+		auto job = std::make_shared<Job_AngularResolution>(observation, fInner_scale, true);
+		
+		// Lock dispatch to add the job to the queue
+		{
+			std::lock_guard<std::mutex> dispatch(dispatch_lock);
+				jobQueue.push_back(job);
+		}
+		// Unlock before notifying so that work can begin immediately (no hurry-up-and-wait)
+		
+		// Wake up the threads to do their work.
+		if(job->RemainingTiles() <= minTilesPerThread)
+			newJob.notify_one();
+		else
+			newJob.notify_all();
+			
+		real_t resolution = job->Get_AngularResolution();
+		
+		// When we didn't keep enough angles to reach weight_target, 
+		// try again without throwing any angles away. I expect this will 
+		// occur only when the event is small.
+		if(resolution < real_t(0))
+		{
+			// false = consider all angles without a cut
+			job = std::make_shared<Job_AngularResolution>(observation, fInner_scale, false);
+			
+			{
+				std::lock_guard<std::mutex> dispatch(dispatch_lock);
+					jobQueue.push_back(job);
+			}
+			
+			if(job->RemainingTiles() <= minTilesPerThread)
+				newJob.notify_one();
+			else
+				newJob.notify_all();
+				
+			resolution = job->Get_AngularResolution();
+		}
+		assert(resolution >= real_t(0));
+		
+		// Lock threadSafe to notify completion of this job.
+		threadSafe.lock();
+			--activeJobs;
+		
+		/* Normally we would now unlock before notification, 
+		 * to prevent a hurry-up-and-wait (i.e. we notify while still holding
+		 * the mutex, so that threads cannot wakeup).
+		 * But this time, the only thing that's waiting for jobDone is the 
+		 * dtor waiting for active jobs to finish.
+		 * Once activeJobs == 0 and threadSafe is unlocked,
+		 * if the dtor happened to spuriously wakeup before notification,
+		 * it would immedietely begin killing this object.
+		 * If this happens BEFORE this function notifies OR returns ... undefined behavior 
+		 * (calling notify on a deconstructed CV, etc.). 
+		 * This race condition is possible, so its inevitable.
+		 * To prevent it, we keep threadSafe locked until the function returns.
+		*/
+			
+		jobDone.notify_one();
+		
+		return resolution;
+	}
+}	
+	
+////////////////////////////////////////////////////////////////////////
+
 std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Obs(size_t const lMax, 
 	ShapedParticleContainer const& particles)
 {
-	return Hl_Job(&particles, &particles, lMax);
+	return Launch_Hl_Job(lMax, particles, particles);
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -1255,7 +1512,7 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Obs(size_t const lMax,
 std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Jet(size_t const lMax, 
 	ShapedParticleContainer const& jets, std::vector<real_t> const& hl_detector_Filter)
 {
-	std::vector<real_t> Hl_vec = Hl_Job(&jets, &jets, lMax);
+	std::vector<real_t> Hl_vec = Launch_Hl_Job(lMax, jets, jets);
 	
 	if(hl_detector_Filter.size())
 	{
@@ -1321,8 +1578,8 @@ std::vector<PowerSpectrum::real_t> PowerSpectrum::Hl_Hybrid(size_t const lMax,
 	
 	// Start the calculations involving the jets
 	{
-		Hl_jets_particles_future = std::async(std::launch::async, &PowerSpectrum::Hl_Job, this,
-			&jets, &particles, lMax);
+		Hl_jets_particles_future = std::async(std::launch::async, &PowerSpectrum::Launch_Hl_Job, this,
+			lMax, std::cref(jets), std::cref(particles));
 			
 		Hl_jets_future = std::async(std::launch::async, &PowerSpectrum::Hl_Jet, this,
 			lMax, std::cref(jets), std::cref(hl_detector_Filter));
@@ -1522,7 +1779,7 @@ for(size_t t = 0; t < numThreads; ++t)
 {
 	// Note, member pointer must be &class::func not &(class::func), https://stackoverflow.com/questions/7134197/error-with-address-of-parenthesized-member-function
 	// Launch with launch::async to launch thread immediately 
-	threadReturn.push_back(std::async(std::launch::async, &PowerSpectrum::Hl_Thread, this));
+	threadReturn.push_back(std::async(std::launch::async, &PowerSpectrum::Thread, this));
 }		
 
 for(size_t t = 0; t < numThreads; ++t)

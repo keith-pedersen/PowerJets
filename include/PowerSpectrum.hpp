@@ -8,9 +8,13 @@
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #include "PowerJets.hpp"
-#include "kdp/kdpTools.hpp"
-#include "Pythia8/Event.h"
 #include "NjetModel.hpp"
+
+#include "kdp/kdpTools.hpp"
+#include "kdp/TiledOuter.hpp"
+
+#include "Pythia8/Event.h"
+
 #include <memory> // shared_ptr
 #include <atomic>
 #include <condition_variable>
@@ -110,44 +114,21 @@ class PowerSpectrum
 		using real_t = PowerJets::real_t;
 		using vec3_t = PowerJets::vec3_t;
 		using vec4_t = PowerJets::vec4_t;
-		
+				
 		//////////////////////////////////////////////////////////////////
 		/*! \defgroup Tiles
 		 *  @brief The outer products used to calculate \f$ H_l \f$ will be 
 		 *  specified and dispatched via a set of tiles.
 		 * 
-		 *  Why? Let me briefly explain. The problem with ...
-		 * 
-		 *  \verbatim 
-		 for(i = 0; i < size: ++i)
-		    for(j = 0; j < size; ++j)
-		       doMath(lhs[i], rhs[j])
-		 \endverbatim
-		 * 
-		 *  is that we iterate over the whole row before moving to the next row.
-		 *  Hence, the inner loop always iterates over every column 
-		 *  (a large swath of memory which must be repeatedly requested, 
-		 *  and is perhaps too large to sit in the CPU's cache). 
-		 *  splits the matrix into smaller squares, each with a local origin (iTile, jTile):
-		 * 
-		 *  \verbatim
-		 for(i = 0; i < 16: ++i)
-		    for(j = 0; j < 16; ++j)
-		       doMath(lhs[iTile + i], rhs[jTile + j])
-		 \endverbatim
-		 *  This allows the calculation to repeatedly access the same 16 rows and columns, 
-		 *  which fit into a few lines of the CPU cache. Thus, repeatedly accessing these 
-		 *  32 elements should often hit the CPU cache, instead of having to wait for main memory.
-		 *  This is very cache efficient, so that the calculation becomes
-		 *  more limited by the FLOPS, and less by the memory bus.
-		 *  Similarly, by choosing a tileWidth = \f$ 2^k \f$, memory should be aligned.
-		*/
+		 *  Details about the superiority of tiling are explained in TiledOuter.hpp
+		*/ 
 				
 		// In the future, these can be dynamic quantities, 
 		// but we don't need that now so we'll hard-code them.
 		
 		//! @brief Max threads in the thread pool
-		static constexpr size_t maxThreads = 4; 
+		static constexpr size_t maxThreads = 4;
+		
 		//! @brief Minimum tiles per thread (to determine how many threads to wake up) \ingroup Tiles
 		static constexpr size_t minTilesPerThread = 1; 
 		
@@ -413,7 +394,7 @@ class PowerSpectrum
 				 * and ShapeFunction::Clone clones ShapeFunction into a shared_ptr<ShapeFunction>.s
 				*/
 				std::vector<std::shared_ptr<ShapeFunction>> shapeVec;
-				
+								
 				// The default shape is a delta-distribution, and the class only needs one
 				static const std::shared_ptr<ShapeFunction> delta;
 				
@@ -464,6 +445,8 @@ class PowerSpectrum
 		*/
 		class DetectorObservation : public PowerSpectrum::ParticleContainer
 		{
+			friend class Job_AngularResolution;
+			
 			public:	
 				using real_t = PowerSpectrum::real_t;
 				using vec3_t = PowerSpectrum::vec3_t;
@@ -506,148 +489,79 @@ class PowerSpectrum
 				 *  
 				 *  Tower's circular caps are defined from the internally stored towerAreas.
 				 *  The lambda for the track's pseudo-normal distribution is determined
-				 *  from the samples angular resolution \f$ \xi_{\min} \f$.
-				 * 
-				 *  We solve for the lambda where a fraction \p u_trackR (u in [0,1])
-				 *  of the track's shape lies within a circle of radius R = \p f_trackR * \f$ \xi_{\min} \f$. 
+				 *  by solving for the lambda where a fraction \p u_track (u in [0,1])
+				 *  of the track's shape lies within a circle of radius R_track 
 				*/  
-				PowerSpectrum::ShapedParticleContainer MakeExtensive(double const f_trackR = 1.,
-					double const u_trackR = 0.9) const;
-				
-				/*! @brief Estimate the angular resolution of the ensemble
-				 *  (as explained in "Harnessing the global correlations of the QCD power spectrum").
-				 * 
-				 *  Find all inter-particle angles using the \ref SmearedDistance
-				 *  (treating tracks as delta distributions and towers as circular caps).
-				 *  Sort the angles from smallest to largest, 
-				 *  each with weight \f$ w_k \equiv w_{ij} = f_i\,f_j \f$, 
-				 *  and find the set of \em M smallest angles whose 
-				 *  total weight exceeds the asymptotic plateau by some factor \p ff_fraction:
-				 *  \f[ \sum_{k=1}^M w_k \ge {\tt ff\_fraction}\times \langle f | f \rangle \f]
-				 *  Return the geometric mean of this set of \em M smallest angles.
-				*/ 
-				real_t AngularResolution(real_t const ff_fraction = real_t(1)) const;
-				
-				/*! \defgroup SmearedDistance
-				 *  @brief Calculating a sample's angular distance requires
-				 *  calculating the angular distance between extensive objects.
-				 * 
-				 *  A track (delta-distribution) striking the exact center of a tower 
-				 *  (energy uniformly distributed over a circular cap of radius R)
-				 *  creates an angle \f$ \xi = 0 \f$ between the two objects.
-				 *  However, because the tower is extensive, 
-				 *  the angle between the two packets of energy is 
-				 *  \em not at zero angle because we must integrate 
-				 *  over the two shape functions
-				 *  	\f[ \xi_{ij}^* = \int {\rm d}\Omega \int {\rm d}\Omega^\prime
-				 *    h_i(\hat{r})\,h_j(\hat{r}^\prime)\arccos(\hat{r}\cdot\hat{r}^\prime) \f]
-				 *  This means that a track striking slightly off center 
-				 *  from the tower is not much different than the same track
-				 *  striking the exact center, because in both cases, 
-				 *  much of the tower energy is distributed at a distance R/2.
-				 * 
-				 *  This "smeared" angle integral is difficult to calculate analytically, 
-				 *  so we opt for Monte Carlo integration. 
-				 *  Unfortunately, this implies a new integral for every radii (slow).
-				 *  However, it we \em scale the raw angle by the tower's radius R
-				 *  (or, if we're calculating the smeared angle between two towers, 
-				 *  their shared radius \f$ R = \sqrt{R_1^2 + R_2^2} \f$, 
-				 *  adding radii in quadrature like the variance of uncorrelated random variates)
-				 *  we get an answer that is nearly independent of angular scale R.
-				 *  Defining this dimensionless, raw angle \f$ r = \xi / R \f$
-				 *  between the centers of the two objects (so r can go to zero), 
-				 *  we calculate the dimensionless, smeared angle \f$ r^* \f$
-				 *  between the packets of energy. We find that as \f$ r \to 0 \f$, 
-				 *  \f$ r^* \f$ flattens to a minima. In fact, the functional 
-				 *  form of this shape is well-approximated by the pseudo-hyperbola:
-				 *  	\f[ r^*(r) = (a^b + r^b)^\frac{1}{b}\f]
-				 *  Thus, as \f$ r \gg R \f$, \f$ r^* \sim r \f$ because 
-				 *  all objects with finite extent appear point-like from far enough away.
-				 *  The parameters a and b were fit to the Monte Carlo integration results for 
-				 *  both track-tower angles and tower-tower angles,
-				 *  and hard-coded into SmearedDistance_TrackTower() and 
-				 *  SmearedDistance_TowerTower() (respectively).
-				 *  Curiously, both shapes are very close to one another,
-				 *  and are essentially independent of R until it approaches 30 degrees or more
-				 *  (indicating towers much larger than we plan to use).
-				 * 
-				 *  To use the dimensionless functions, one calculates the system radius \em R, 
-				 *  then finds \f$ \xi^* = R\,r^*(\xi / R) \f$.
-				*/ 
-				
-				/*! \ingroup SmearedDistance
-				 *  @brief The smeared angular distance between a delta distribution and a 
-				 *  circular cap of radius R_cap, in terms of the dimensionless angle r = xi / R_cap.
-				 */  
-				static real_t SmearedDistance_TrackTower(real_t const r);
-				
-				/*! \ingroup SmearedDistance
-				 *  @brief The smeared distance between two circular caps of radius 
-				 *  \f$ R = \sqrt{R_1^2 + R_2^2} \f$ in terms of the dimensionless angle r = xi / R.
-				 */
-				static real_t SmearedDistance_TowerTower(real_t const r);
-		};
-				
-	private:
-		/*! \ingroup Tiles
-		 *  @brief The type of tile for a tiled outer product
-		 *  
-		 *  When we split the outer product into tiles, there are 
-		 *  five different types of tile we can have:
-		 *  (D)iagonal, (C)enter, (B)ottom, (R)ight, and (F)inal.
-		 *  Each will require different treatment inside Hl_Thread(), 
-		 *  depending on if the outer product is symmetric.
-		 *  \verbatim
-		    u x u (symmetric)     u x v (asymmetric)
-		    +-----+-----+---     +-----------------+---
-		    | D D | * * | *      | C C | C C | C C | R
-		    | D D | * * | *      | C C | C C | C C | R
-		    +-----+-----+---     +-----+-----+-----+---
-		    | C C | D D | *      | B B | B B | B B | F
-		    | C C | D D | * 
-		    +-----+-----+---
-		    | B B | B B | F 
-		 \endverbatim 
-		 *  SYMMETRIC: We do not need to calculate the redundant upper tiles, 
-		 *  we can simply double off-diagonal tiles (i.e. RIGHT are the same as BOTTOM, 
-		 *  and each CENTER show up twice, so simply double their contribution).
-		 *  However, DIAGONAL tiles are kept full (and thus half-redundant)
-		 *  because it is faster than jagged, non-redundant tiles. 
-		 *  This requires \em not doubling the DIAGONAL tiles' contribution.
-		 *  BOTTOM tiles have less rows than a full tile, but every row is a full tileWidth;
-		 *  this keeps them efficient for auto-vectorized SIMD instructions.
-		 *  The FINAL tile is jagged (diagonal and lower elements only)
-		 *  \em only if it is small; otherwise it is faster to make FINAL a 
-		 *  redundant square (like DIAGONAL, albeit with rows that are not full).
-		 * 
-		 *  ASYMMETRIC: There is no redundancy; all CENTER tiles are unique.
-		 *  BOTTOM tiles have less rows than a full tile, but ever row is a full tileWidth.
-		 *  Conversely, RIGHT tiles have lass columns than a full tile, 
-		 *  but every column is a full tileWidth. Since the outer product loops 
-		 *  iterate over columns in the inner loop (which is always the one that is vectorized), 
-		 *  RIGHT tiles are less efficient. To fix this problem,
-		 *  we treat the columns like rows for RIGHT tiles
-		 *  (i.e. we swap the pointers to u and v and also iTile and jTile).
-		 *  The FINAL tile is square, but its rows are not full.
-		*/ 
-		enum class TileType {DIAGONAL, CENTRAL, BOTTOM, RIGHT, FINAL};
-	
-			GCC_IGNORE_PUSH(-Wpadded)
-		//! \ingroup Tiles
-		//! @brief A tile is specified by its boundaries and type
-		struct TileSpecs
-		{
-			size_t row_beg; //!< @brief The index of the first row
-			size_t row_width; //!< @brief The number of rows
-			size_t col_beg; //!< @brief The index of the first column
-			size_t col_width; //!< @brief The number of columns
-			TileType type;
+				PowerSpectrum::ShapedParticleContainer MakeExtensive
+				(real_t const angularResolution, real_t const f_trackR = 1.,
+					real_t const u_trackR = 0.9) const;
 		};
 		
-		/*! \ingroup Tiles
-		 *  @brief A class to transmit an Hl calculation to a thread in the thread pool
+		/*! \defgroup SmearedDistance
+		 *  @brief Calculating a sample's angular distance requires
+		 *  calculating the angular distance between extensive objects.
 		 * 
-		 *  Threads are given a Job, which specifies an H_l calculation. 
+		 *  A track (delta-distribution) striking the exact center of a tower 
+		 *  (energy uniformly distributed over a circular cap of radius R)
+		 *  creates an angle \f$ \xi = 0 \f$ between the two objects.
+		 *  However, because the tower is extensive, 
+		 *  the angle between the two packets of energy is 
+		 *  \em not at zero angle because we must integrate 
+		 *  over the two shape functions
+		 *  	\f[ \xi_{ij}^* = \int {\rm d}\Omega \int {\rm d}\Omega^\prime
+		 *    h_i(\hat{r})\,h_j(\hat{r}^\prime)\arccos(\hat{r}\cdot\hat{r}^\prime) \f]
+		 *  This means that a track striking slightly off center 
+		 *  from the tower is not much different than the same track
+		 *  striking the exact center, because in both cases, 
+		 *  much of the tower energy is distributed at a distance R/2.
+		 * 
+		 *  This "smeared" angle integral is difficult to calculate analytically, 
+		 *  so we opt for Monte Carlo integration. 
+		 *  Unfortunately, this implies a new integral for every radii (slow).
+		 *  However, it we \em scale the raw angle by the tower's radius R
+		 *  (or, if we're calculating the smeared angle between two towers, 
+		 *  their shared radius \f$ R = \sqrt{R_1^2 + R_2^2} \f$, 
+		 *  adding radii in quadrature like the variance of uncorrelated random variates)
+		 *  we get an answer that is nearly independent of angular scale R.
+		 *  Defining this dimensionless, raw angle \f$ r = \xi / R \f$
+		 *  between the centers of the two objects (so r can go to zero), 
+		 *  we calculate the dimensionless, smeared angle \f$ r^* \f$
+		 *  between the packets of energy. We find that as \f$ r \to 0 \f$, 
+		 *  \f$ r^* \f$ flattens to a minima. In fact, the functional 
+		 *  form of this shape is well-approximated by the pseudo-hyperbola:
+		 *  	\f[ r^*(r) = (a^b + r^b)^\frac{1}{b}\f]
+		 *  Thus, as \f$ r \gg R \f$, \f$ r^* \sim r \f$ because 
+		 *  all objects with finite extent appear point-like from far enough away.
+		 *  The parameters a and b were fit to the Monte Carlo integration results for 
+		 *  both track-tower angles and tower-tower angles,
+		 *  and hard-coded into SmearedDistance_TrackTower() and 
+		 *  SmearedDistance_TowerTower() (respectively).
+		 *  Curiously, both shapes are very close to one another,
+		 *  and are essentially independent of R until it approaches 30 degrees or more
+		 *  (indicating towers much larger than we plan to use).
+		 * 
+		 *  To use the dimensionless functions, one calculates the system radius \em R, 
+		 *  then finds \f$ \xi^* = R\,r^*(\xi / R) \f$.
+		*/ 
+		
+		/*! \ingroup SmearedDistance
+		 *  @brief The smeared angular distance between a delta distribution and a 
+		 *  circular cap of radius R_cap, in terms of the dimensionless angle r = xi / R_cap.
+		 */  
+		static real_t SmearedDistance_TrackTower(real_t const r);
+		
+		/*! \ingroup SmearedDistance
+		 *  @brief The smeared distance between two circular caps of radius 
+		 *  \f$ R = \sqrt{R_1^2 + R_2^2} \f$ in terms of the dimensionless angle r = xi / R.
+		 */
+		static real_t SmearedDistance_TowerTower(real_t const r);
+				
+	private:
+					GCC_IGNORE_PUSH(-Wpadded)	
+		/*! \ingroup Tiles
+		 *  @brief A class to transmit an linear algebra jobs to a thread in the thread pool
+		 * 
+		 *  Threads are given a Job, which specifies a calculation. 
 		 *  Each Job is broken into tiles, whose TileSpecs are stored inside the Job.
 		 *  Each Job will be dispatched to multiple threads until the job is complete. 
 		 *  Then, the thread adding the final tile will release the hold on the job 
@@ -664,10 +578,28 @@ class PowerSpectrum
 		*/ 
 		class Job
 		{
-			private: 
-				//! @brief A list of tiles which need calculation
-				std::vector<TileSpecs> tileVec;
+			public:
+				using TileSpecs = TiledOuter::TileSpecs<tileWidth>;
+				using TileSpecs_ptr = std::unique_ptr<TileSpecs>;
+				using TileFill = TiledOuter::TileFill;
+												
+				typedef std::array<real_t, TileSpecs::incrementSize> array_t;
+			
+			protected:
+				//! @brief A list of tiles which need calculation; filled by the derived ctor
+				std::vector<TileSpecs_ptr> tileVec;
 				
+				//! @brief How many tiles are incomplete? When 0, job is done; notify sub-manager.
+				//! Set by the derived ctor
+				size_t remainingTiles;
+				
+				/*! @brief Defer initialization
+				 * 
+				 *  The derived ctor \em must fill tileVec and set remainingTiles.
+				*/ 
+				Job();
+								
+			private:
 				/*! @brief A thread-safe iterator used to assign the next tile to each thread.
 				 * 
 				 * Each thread is assigned tileVec[nextTile++].
@@ -679,44 +611,63 @@ class PowerSpectrum
 				*/
 				std::atomic<size_t> nextTile;
 				
-				std::condition_variable done; //!< @brief Notify sub-manager of job completion.
-				std::mutex jobLock; //!< @brief Synchronize (done) and (remainingTiles).
-				//! @brief How many tiles are incomplete? When 0, job is done; notify sub-manager.
-				size_t remainingTiles;
+				mutable std::condition_variable done; //!< @brief Notify sub-manager of job completion.
+				mutable std::mutex jobLock; //!< @brief Synchronize (done) and (remainingTiles).
 				
-				std::vector<real_t> Hl_total; //!< @brief The total Hl accumulated by threads running the job
+			protected:
+				//! @brief If tiles remain, return a TileSpecs pointer;
+				//! return \p nullptr when no tiles remain.
+				TileSpecs* NextTile();
 				
-			public:				
-				/*! @defgroup LeftRight
+				/*! @brief Finalize a threads work, given the number of tiles it completed
 				 *  
-				 *  By default, the "left" supplies the rows and the "right" the columns.
-				 *  However, this is reversed for RIGHT tiles (right is rows, left is columns) 
-				 *  so that only FINAL tiles have half-full rows.
-				 *  This scheme improves the efficiency of SIMD vectorization.
-				*/
+				 *  Because derived Jobs do different things, this function 
+				 *  does not know how to finalize job. Instead, it accepts 
+				 *  the derivedJob class as an argument and uses it as a functor.
+				 *  This requires accepting as many additional arguments as necessary
+				 *  and perfect-forwarding them to the functor.
+				 * 
+				 *  \note Designing this function this way allows us to code
+				 *  the thread safety in one place, with the Job specific work defined elsewhere.				 *  
+				 */  
+				template<typename Job_derivedClass, typename... Args>
+				void Finalize_Thread(size_t const numTiles, Job_derivedClass& functor, Args&&... args)
+				{
+					// Don't waste time synchronizing if no tiles were pulled; nothing to do
+					if(numTiles) 
+					{
+						//Synchronize Hl_total and remainingTiles (job completion)
+						std::unique_lock<std::mutex> lock(jobLock);
+						
+						// Treat the derived Job class as a functor
+						functor(std::forward<Args>(args)...);
+
+						remainingTiles -= numTiles;
+						assert(remainingTiles <= tileVec.size());
+						
+						// Unlock before notify to prevent hurry-up-and-wait
+						lock.unlock();
+					
+						// If all tiles are done, notify the sub-manager (we are outside of lock, 
+						// so this could create a race to notify, but that's not a problem).
+						if(remainingTiles == 0)
+						{
+							// Sanity check; if the job is done, all tiles were assigned
+							assert(nextTile >= tileVec.size());
+							
+							done.notify_one();
+						}
+					}
+				}
 				
-				ShapedParticleContainer const* left; //!< @brief rows @ingroup LeftRight 
-				ShapedParticleContainer const* right; //!< @brief columns @ingroup LeftRight 
+				//! @brief Block until the job is done
+				void WaitTillDone() const;
 				
-				size_t lMax; //! @brief Calculate H_l form l = 1 -- lMax
-				
-				/*! @brief Construct a job with a given left and right containers, 
-				 *  a given lMax, and stealing/moving the vector of TileSpecs
-				 *  (which was filled especially for this object)
-				*/ 
-				Job(ShapedParticleContainer const* const left_in,
-					ShapedParticleContainer const* const right_in,
-					size_t const lMax_in, 
-					std::vector<TileSpecs>&& tileVec_in);
-			
-				//! @brief If tiles remain, fill the next TileSpec into \p tile.
-				//! Return false when no tiles remain (signifying that \p tile was not altered).
-				bool GetTile(TileSpecs& tile);
-				
+			public:
 				/*! @brief Number of incomplete tiles
 				 * 
-				 *  \warning This is \em not thread safe, but is only used by 
-				 *  sub-manager to determine how many threads to notify about the new job 
+				 *  \note This is \em not thread safe, but is only used by 
+				 *  the sub-manager to determine how many threads to notify about the new job 
 				 *  (notify_one or notify_all). In the case of a race condition, 
 				 *  too many threads will be awoken, which likely has minimal side effects.
 				 */
@@ -725,28 +676,219 @@ class PowerSpectrum
 				/*!  @brief When a job is fully assigned, it can be pruned from jobQueue
 				 * 
 				 *  \note The result is \em not thread safe, and may soon become invalid. 
-				 *  In the case of a race condition, a finished job will be dispatched to a thread, 
-				 *  which will quickly realize that the job is done and ask for another.
-				 *  It will \em not attempt to do anything to the finished job,
+				 *  In the case of a race condition, a full assigned job will be dispatched to a thread, 
+				 *  which will quickly realize that the job is full assigned and ask for another.
+				 *  It will \em not attempt to do anything to the full assigned job,
 				 *  so this side effect is not terrible.
 				*/ 
-				bool IsFullyAssigned() const {return nextTile >= tileVec.size();}
+				bool IsFullyAssigned() const {return (nextTile >= tileVec.size());}
+			
+				virtual void DoTiles() = 0;
+		};
+		
+		class Job_Hl : public Job
+		{
+			private:
+				using shapePtr_t = std::shared_ptr<ShapeFunction>;
 				
-				/*! @brief Take the \p Hl_partial calculated by one thread 
-				 *  (for all the tiles it was assigned in this job) and add it to Hl_total.
+				////////////////////////////////////////////////////////////
+				
+				using ApplyShapes_t = uint_fast8_t;
+				
+				/*! @brief When do we apply shape functions to \p Hl_partial in DoTiles(); 
+				 *  before or after it is accumulated into a single number.
+				 *
+				 *  If all the rows share the same shape, and all the columns have the same shape:
+				 *  \f[	H_l = h_l^{row} * h_l^{col} * <f_row| P_l( |p_row> <p_col| ) |f_col> \f]
+				 *  In this case, we can multiply the shape after the accumulating Hl_accumulate 
+				 *  (which uses less FLOPS). Otherwise, we must multiply shape before we accumulate.
+				 *  
+				 *  ApplyShapes is a bit flag; bothBefore = BitAnd(rowsBefore, colsBefore)
 				 * 
-				 *  We need to know how many tiles this \p Hl_partial is for (i.e., \p numTiles)
-				 *  so we can decrement \c remainingTiles (guarded by jobLock).
-				*/ 
-				void Add_Hl(std::vector<real_t>& Hl_partial, size_t const numTiles);
+				 *  \note Normally we would define an enum class inside a function
+				 *  (so as not to clutter the class; hide as much implementation as possible).
+				 *  However, we need to define bitwise operators for a strongly-typed enum.
+				*/
+				enum class ApplyShapes : ApplyShapes_t {after = 0, // rows and cols after
+					rowsBefore = 1, // rows before, cols after
+					colsBefore = 2, // cols ...
+					bothBefore = 3}; // you get it
 				
+				// I would rather use "operator bitor", but the compiler won't take static "operator bitor"
+				static ApplyShapes BitOr(ApplyShapes const left, ApplyShapes const right);				
+				static ApplyShapes BitAnd(ApplyShapes const left, ApplyShapes const right);
+				static bool IsBefore(ApplyShapes const val);
+				
+				////////////////////////////////////////////////////////////
+			
+				//! @brief Accumulate the partial jobs with a functor
+				struct Accumulate : public std::vector<real_t>
+				{
+					/*! @brief Add Hl_Partial to this.
+					 * 
+					 *  We pas Hl_partial by reference so we can std::move it 
+					 *  and steal its contents if this is empty
+					*/ 
+					void operator()(std::vector<real_t>& Hl_partial);
+				};
+			
+				ShapedParticleContainer const* const rows; //!< @brief rows
+				ShapedParticleContainer const* const cols; //!< @brief columns
+				
+				Accumulate Hl_total;
+				
+				size_t const lMax; //! @brief Calculate H_l form l = 1 -- lMax
+				
+				//! @brief Having completed \p numTiles, add \p Hl_partial to Hl_total
+				void Finalize_Thread(size_t const numTiles, std::vector<real_t>& Hl_partial);
+				
+				/*! @brief Clone shape functions for internal use
+				 * 
+				 *  ShapeParticleContainer.shapeVec is a vector of pointers to shape functions.
+				 *  If all the particles use the same shape function, it is the same pointer over and over.
+				 *  This is beneficial because ShapeFunction.hl operates recursively, 
+				 *  and remembers its last value. So the first time hl(10) is called, 
+				 *  math is done, but the second time hl(10) is called, we look up the cached value.
+				 *  But since ShapeFunction's are not thread-safe, we must clone any we intend to use.
+				 *  Tf we have repeated pointers in shapeVec, a simple cloning 
+				 *  will create a unique clone for each repeat. We therefore use 
+				 *  std::map to map unique shapes to their unqiue clones.
+				*/
+				static std::vector<shapePtr_t> CloneShapes(std::vector<shapePtr_t> const& shapeVec, 
+					size_t const begin, size_t const size);
+					
+			public:
+				//! @brief Construct a job with a given rows and columns
+				Job_Hl(size_t const lMax_in, 
+					ShapedParticleContainer const& left,
+					ShapedParticleContainer const& right);
+				
+				virtual void DoTiles() override final;
+			
 				/*! @brief Block until the job is complete, then return the total Hl for all tiles.
 				 * 
 				 *  Called by the sub-manager after dispatching the job.
 				*/ 
 				std::vector<real_t> Get_Hl();
 		};
-			GCC_IGNORE_POP
+		
+		struct AngleWeight
+		{
+			real_t angle; 
+			real_t weight;
+			
+			AngleWeight() = default;
+			AngleWeight(real_t const angle, real_t const weight);
+			
+			bool operator < (AngleWeight const& rhs) const;
+			
+			//! @brief Sort a vector whose head is sorted and tail in unsorted
+			static void ReSort(std::vector<AngleWeight>& headTail, size_t const n_sorted);					
+		};
+		
+		class Job_AngularResolution : public Job
+		{
+			private:
+				enum class TileType {TrackTrack, TowerTrack, TowerTower};
+			
+				struct TileSpecs : public Job::TileSpecs
+				{
+					TileType type;
+										
+					TileSpecs(size_t const row_beg, size_t const num_rows,
+						size_t const col_beg, size_t const num_cols, 
+						TileType const type_in);
+				};				
+				
+				//! @brief Accumulate the partial jobs with a functor
+				struct Accumulate : public std::vector<AngleWeight>
+				{
+					/*! @brief Add Hl_Partial to this.
+					 * 
+					 *  We pass Hl_partial by reference so we can std::move it 
+					 *  and steal its contents if this is empty.
+					 * 
+					 *  \warning We assume that this and angleWeight_partial are both fully sorted.
+					*/ 
+					void operator()(std::vector<AngleWeight>& angleWeight_partial);
+				};
+				
+				/*! @brief Given cosXi and the tile type, calculate the extensive angle.
+				 *  If this angle is smaller than xi_max, append it to angleWeight_sorted.
+				 * 
+				 *  Take the absolute index of the two particles
+				 * 
+				 *  \return The quantity of weight appended to angleWeight_sorted.
+				*/ 				
+				real_t NewAngle(std::vector<AngleWeight>& angleWeight_sorted,
+					real_t const cosXi, real_t const weight,
+					size_t const i_abs, size_t const j_abs, TileType const type) const;
+				
+				/*! @brief Remove the tail of angleWeight_sorted until its 
+				 *  total weight is just above weight_target.
+				 * 
+				 *  \return The amount of weight removed from the tail.
+				*/ 
+				real_t StripTailWeight(std::vector<AngleWeight>& angleWeight_sorted, 
+					real_t const totalWeight) const;
+					
+				//! @brief Having completed \p numTiles, add \p angleWeight_sorted to angleWeight_final
+				void Finalize_Thread(size_t const numTiles, std::vector<AngleWeight>& angleWeight_sorted);
+				
+				////////////////////////////////////////////////////////////
+				
+				PhatFvec towers;
+				PhatFvec tracks;
+				
+				std::vector<real_t> twrRadii;
+				
+				real_t weight_target;
+				
+				////////////////////////////////////////////////////////////
+				
+				/*! @brief The minimum cos(xi) for consideration as a smallest angle
+				 *  (BEFORE the angle is made extensive)
+				 * 
+				 *  \note Use (good = (cosXi > cosXi_min))
+				 * 
+				 *  Set by the constructor to (angleMargin) times the expected nearest-neighbor angle.
+				 *  By construction, particles cannot be more evenly distributed
+				 *  than total isotropy, making min_cosXi a conservative cut
+				 *  (i.e., when particles clump, more pass the cut).
+				*/ 
+				real_t cosXi_min;
+				
+				/*! @brief The maximum xi for consideration as a smallest angle
+				 *  (AFTER the angle is made extensive)
+				 * 
+				 *  Set by the constructor to (angleMargin) times the expected nearest-neighbor angle.
+				 *  By construction, particles cannot be more evenly distributed
+				 *  than total isotropy, making xi_max a conservative cut
+				 *  (i.e., when particles clump, more pass the cut).
+				*/
+				real_t xi_max;
+				
+				//! @brief The safety margin for cosXi_min
+				static real_t constexpr angleMargin = 2.;
+				
+				////////////////////////////////////////////////////////////
+								
+				Accumulate angleWeight_final; //!< @brief The final list of smallest angles
+				
+			public:
+				//! @brief Construct an angular resolution job for observation.
+				Job_AngularResolution(DetectorObservation const& observation,
+					real_t const fInner_scale, bool const xi_cut);
+			
+				virtual void DoTiles() override final;
+			
+				/*! @brief Block until the job is complete, then return the angular resolution
+				 * 
+				 *  Called by the sub-manager after dispatching the job.
+				*/ 
+				real_t Get_AngularResolution();
+		};
+					GCC_IGNORE_POP
 		
 		////////////////////////////////////////////////////////////////
 		/*! \defgroup ThreadSynchronization
@@ -765,7 +907,7 @@ class PowerSpectrum
 		*/ 
 		
 		//! \ingroup ThreadSynchronization
-		//! @brief Used by Hl_Job() to notify threads that jobQueue has just grown.
+		//! @brief Used by Launch_Hl_Job() to notify threads that jobQueue has just grown.
 		std::condition_variable newJob;
 		
 		//! \ingroup ThreadSynchronization
@@ -824,9 +966,9 @@ class PowerSpectrum
 		 *  it grabs tiles till they're all gone, then adds 
 		 *  its accumulated Hl to the Job's Hl. If there are no Jobs, the thread goes idle.
 		*/
-		void Hl_Thread();
+		void Thread();
 		
-		/*! @brief Dispatch Jobs the thread pool (called by threads in Hl_Thread())
+		/*! @brief Dispatch Jobs the thread pool (called by threads in Thread())
 		 * 
 		 *  It is extremely useful to encapsulate the following 
 		 *  functionality into a single function: 
@@ -834,10 +976,10 @@ class PowerSpectrum
 		 *  2. Internally prune inactive Jobs from the jobQueue.
 		 *  3. Block/wait until there are Jobs (putting threads to sleep).
 		 *  4. When all jobs are complete and <tt> keepAlive == false </tt>, 
-		 *     return nullptr (shared_ptr equivalent), instructing threads to exit Hl_Thread().
+		 *     return nullptr (shared_ptr equivalent), instructing threads to exit Thread().
 		 * 
 		 *  \return A shared_ptr to an active Job, or nullptr when it is time for threads
-		 *  to return from Hl_Thread
+		 *  to return from Thread
 		*/
 		std::shared_ptr<Job> Dispatch();
 		
@@ -851,15 +993,38 @@ class PowerSpectrum
 		 * 
 		 *  @throws throws a runtime_error if called after the dtor.
 		 */
-		std::vector<real_t> Hl_Job(ShapedParticleContainer const* const left_in, 
-			ShapedParticleContainer const* const right_in, size_t const lMax);
-	
+		std::vector<real_t> Launch_Hl_Job(size_t const lMax, 
+			ShapedParticleContainer const& left, ShapedParticleContainer const& right);			
+			
 	public:
 		//! @brief Construct a thread pool of a given size.
 		PowerSpectrum(size_t const numThreads = maxThreads);	
 		
 		//! @brief Wait for all active jobs to finish, then destroy the thread pool.
 		~PowerSpectrum();
+		
+		/*! @brief Estimate the angular resolution of the ensemble
+		 *  (as explained in "Harnessing the global correlations of the QCD power spectrum").
+		 * 
+		 *  Find all inter-particle angles using the \ref SmearedDistance
+		 *  (treating tracks as delta distributions and towers as circular caps).
+		 *  Sort the angles from smallest to largest, 
+		 *  each with weight \f$ w_k \equiv w_{ij} = f_i\,f_j \f$, 
+		 *  and find the set of \em M smallest angles whose 
+		 *  total weight exceeds the asymptotic plateau by some factor \p ff_fraction:
+		 *  \f[ \sum_{k=1}^M w_k \ge {\tt ff\_fraction}\times \langle f | f \rangle \f]
+		 *  Return the geometric mean of this set of \em M smallest angles.
+		*/ 
+		real_t AngularResolution(DetectorObservation const& observation, 
+			real_t const fInner_scale = real_t(1));
+			
+		/*! @brief Calculates and sorts \em every inter-particle angle to find the angular resolution
+		 * 
+		 *  This function uses a single thread \em and a ton of memory,
+		 *  and is provided primarily to test the parallel version (\ref AngularResolution) 
+		*/ 
+		static real_t AngularResolution_Slow(DetectorObservation const& observation, 
+			real_t const fInner_scale = real_t(1));
 	
 		/*! @brief Given an ensemble of particles, calculate their power spectrum 
 		 *  from \f$ \ell = 1 \f$ to \p lMax
