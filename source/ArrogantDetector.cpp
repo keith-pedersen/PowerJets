@@ -463,7 +463,7 @@ void ArrogantDetector::Clear()
 
 ////////////////////////////////////////////////////////////////////////
 
-void ArrogantDetector::Finalize(bool const correctMisingE)
+void ArrogantDetector::Finalize(METcorrection const method)
 {
 	if(finalized)
 		throw std::runtime_error("ArrogantDetector: Detector already finalized; you probably didn't mean to do this.");
@@ -473,8 +473,7 @@ void ArrogantDetector::Finalize(bool const correctMisingE)
 	WriteCal(backCal, true); // flipZ = true
 		backCal.clear();
 	
-	if(correctMisingE)
-		AddMissingE();
+	AddMissingE(method);
 	
 	finalized = true;
 }
@@ -702,25 +701,35 @@ void ArrogantDetector::WriteCal(cal_t const& cal, bool const flipZ)
 ////////////////////////////////////////////////////////////////////////F
 
 // TODO: This is probably not the correct approach to missing energy
-void ArrogantDetector::AddMissingE()
+void ArrogantDetector::AddMissingE(METcorrection const method)
 {
-	// Discard all tracked pileup
-	for(vec3_t const& pileup : tracks_PU)
+	switch(method)
 	{
-		visibleP3 -= pileup;
-		visibleE -= pileup.Mag();
-	}
-	
-	vec3_t const correctionP3 = -visibleP3;
+		case METcorrection::None:
+		break;
 		
-	// MET is treated as a tower, due to poor angular resolution, 
-	// but it is not correct to simply add it as if it was detected.
-	// Instead, we spread it out proportional to each tower's fraction of the tower energy.
-	double const towerE = std::accumulate(towers.begin(), towers.end(), 0., 
-		[](double const sum, vec3_t const& tower){return sum + tower.Mag();});
-	
-	for(vec3_t& tower : towers)
-		tower += correctionP3 * (tower.Mag() / towerE);
+		case METcorrection::ToAllTowers:
+		{
+			// Discard all tracked pileup
+			for(vec3_t const& pileup : tracks_PU)
+			{
+				visibleP3 -= pileup;
+				visibleE -= pileup.Mag();
+			}
+			
+			vec3_t const correctionP3 = -visibleP3;
+				
+			// MET is treated as a tower, due to poor angular resolution, 
+			// but it is not correct to simply add it as if it was detected.
+			// Instead, we spread it out proportional to each tower's fraction of the tower energy.
+			double const towerE = std::accumulate(towers.begin(), towers.end(), 0., 
+				[](double const sum, vec3_t const& tower){return sum + tower.Mag();});
+			
+			for(vec3_t& tower : towers)
+				tower += correctionP3 * (tower.Mag() / towerE);
+		}
+		break;
+	}	
 }
 
 ////////////////////////////////////////////////////////////////////////

@@ -366,6 +366,7 @@ class PowerSpectrum
 		class ShapedParticleContainer : public PhatFvec
 		{
 			friend class PowerSpectrum;
+			friend class LHE_Pythia_PowerJets;
 			
 			private:
 				/* There are three cases for shapes in the container: 
@@ -636,6 +637,8 @@ class PowerSpectrum
 					// Don't waste time synchronizing if no tiles were pulled; nothing to do
 					if(numTiles) 
 					{
+						assert(numTiles <= tileVec.size());
+						
 						//Synchronize Hl_total and remainingTiles (job completion)
 						std::unique_lock<std::mutex> lock(jobLock);
 						
@@ -706,7 +709,7 @@ class PowerSpectrum
 				 *  ApplyShapes is a bit flag; bothBefore = BitAnd(rowsBefore, colsBefore)
 				 * 
 				 *  \note Normally we would define an enum class inside a function
-				 *  (so as not to clutter the class; hide as much implementation as possible).
+				 *  (so as not to clutter the class ... always hide as much implementation as possible).
 				 *  However, we need to define bitwise operators for a strongly-typed enum.
 				*/
 				enum class ApplyShapes : ApplyShapes_t {after = 0, // rows and cols after

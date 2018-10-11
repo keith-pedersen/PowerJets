@@ -76,7 +76,7 @@ LHE_Pythia_PowerJets::LHE_Pythia_PowerJets(QSettings const& parsedINI):
 	//////////////////////////
 	// Initialize the detector	
 	detector = ArrogantDetector::NewDetector(parsedINI, settings.Main__detectorName);
-	std::cout << detector->GetSettings().etaMax_cal << std::endl;
+	//~ std::cout << detector->GetSettings().etaMax_cal << std::endl;
 	
 	Initialize_FastJet();
 	
@@ -290,7 +290,7 @@ void LHE_Pythia_PowerJets::Initialize_FastJet()
 	pileupEstimator = fastjet::JetMedianBackgroundEstimator(pileupSelector, 
 		clusterAlg_pileup, areaDef_pileup);
 		
-	std::cout << pileupEstimator.use_area_4vector() << std::endl;
+	//~ std::cout << pileupEstimator.use_area_4vector() << std::endl;
 	
 	// To help manipulate the background estimator, we also provide a
 	// transformer that allows to apply directly the background
@@ -314,7 +314,7 @@ void LHE_Pythia_PowerJets::Initialize_FastJet()
 
 ////////////////////////////////////////////////////////////////////////
 
-LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork()
+LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork(METcorrection const method)
 {
 	Clear(); // Clear all caches, ESPECIALLY if there's a problem
 	
@@ -333,22 +333,26 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::DoWork()
 				detector->PartialFill(*pileup, true); // isPileup = true
 			}
 		}
-		detector->Finalize();
+		detector->Finalize(method);
 		
 		detected = detector->Tracks();
 		detected.insert(detected.end(), 
 			detector->Towers().cbegin(), detector->Towers().cend());
 		
 		// Get the observation and make tracks extensive based upon the sample's angular resolution
-		tracksTowers = detector->GetObservation().
-			MakeExtensive(settings.PowerJets__fR_track, settings.PowerJets__u_track);
+		auto observation = detector->GetObservation();
+		assert(kdp::AbsRelError(observation.fTotal(), real_t(1)) < 1e-14);
+				
+		tracksTowers = observation.MakeExtensive(Hl_computer.AngularResolution(observation),
+			settings.PowerJets__fR_track, settings.PowerJets__u_track);
 	}
 	return status;
 }
 
 ////////////////////////////////////////////////////////////////////////
 
-LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool doWork)
+LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool doWork,
+	METcorrection const method)
 {
 	if(status == Status::UNINIT)
 		status = Status::OK;
@@ -380,7 +384,7 @@ LHE_Pythia_PowerJets::Status LHE_Pythia_PowerJets::Next_internal(bool doWork)
 	}
 	
 	if(doWork)
-		return DoWork(); // Return status after doing work
+		return DoWork(method); // Return status after doing work
 	else
 		return status;
 }
@@ -463,9 +467,17 @@ LHE_Pythia_PowerJets::~LHE_Pythia_PowerJets()
 std::vector<LHE_Pythia_PowerJets::real_t> const&
 LHE_Pythia_PowerJets::Get_Hl_Obs(size_t const lMax) const
 {
-	if(Hl_Obs.size() < lMax) 
+	if(Hl_Obs.size() < lMax)
 		Hl_Obs = Hl_computer.Hl_Obs(lMax, tracksTowers); // cache the first call
 	return Hl_Obs;
+}
+
+////////////////////////////////////////////////////////////////////////
+
+std::vector<LHE_Pythia_PowerJets::real_t>
+LHE_Pythia_PowerJets::Get_Hl_ME(size_t const lMax) const
+{
+	return Hl_computer.Hl_Obs(lMax, VecPhatF(detector->ME(), true)); // normalize = true
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -478,7 +490,7 @@ PowerSpectrum::ShapedParticleContainer LHE_Pythia_PowerJets::JetContainer
 	if(f_pileup < real_t(0))
 		throw std::runtime_error("LHE_Pythia_PowerJets::JetContainer: A negative pileup fraction is not feasible");
 		
-	ShapedParticleContainer container(jets, false);
+	ShapedParticleContainer container(jets, false); // normalizeF = false
 	
 	if(f_pileup > real_t(0))
 	{
@@ -489,11 +501,12 @@ PowerSpectrum::ShapedParticleContainer LHE_Pythia_PowerJets::JetContainer
 		real_t const normalizeFactor = container.fTotal() / (real_t(1) - f_pileup);
 		container.NormalizeF_to(normalizeFactor); 
 			
-		container.emplace_back(PhatF(vec3_t(0, 0, f_pileup)), pileupShape);		
-		assert(std::fabs(container.fTotal() - real_t(1)) < 1e-15);
+		container.emplace_back(PhatF(vec3_t(0, 0, f_pileup)), pileupShape);
 	}
 	else
 		container.NormalizeF();
+		
+	assert(std::fabs(container.fTotal() - real_t(1)) < 1e-15);
 		
 	return container;
 }

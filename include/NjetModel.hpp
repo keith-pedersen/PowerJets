@@ -87,7 +87,7 @@ class ShapedJet : public Jet
 	public:
 		/*! @brief The address of the jet in the ShowerParticle splitting tree.
 		 * 
-		 *  The address is described by ShowerParticle. 
+		 *  The address format is described in ShowerParticle. 
 		 *  It is kept in ShapedJet for simplicity of the Cython code, 
 		 *  but it really shouldn't exist in ShapedJet at all.
 		*/ 
@@ -101,7 +101,7 @@ class ShapedJet : public Jet
 		using incrementArray_t = std::array<real_t, incrementSize>;
 		
 		//! @brief The container to pass parameters defining non-isotropic shapes
-		using param_iter_t = std::vector<real_t>::const_iterator;
+		typedef std::vector<real_t>::const_iterator param_iter_t;
 		
 			GCC_IGNORE_PUSH(-Wunused-parameter)
 		/*! @brief The azimuthally symmetric jet shape function.
@@ -165,6 +165,8 @@ class ShapedJet : public Jet
 		
 		//! @brief Sort ShapedJet's by their mass
 		bool operator < (ShapedJet const& that) const;
+		
+		ShapedJet& operator=(ShapedJet const&) = default;
 };
 
 GCC_IGNORE_PUSH(-Wpadded)
@@ -348,6 +350,11 @@ class ShowerParticle : public ShapedJet
 		*/
 		static address_error AddressAlreadySplit(std::vector<bool> const& address);
 		
+		//! @brief If a variable does not exist in the prescribed domain
+		//! (or is nan), throw a domain_error
+		static void DomainCheck(real_t const val, std::string const& name, 
+			real_t const min, real_t const max);
+		
 		/*! @brief The energy lost during the splitting.
 		 * 
 		 *  \note This is unsafe because it de-references \ref b and \ref c without 
@@ -357,47 +364,38 @@ class ShowerParticle : public ShapedJet
 		{
 			return (b->p4.x0 + c->p4.x0) - p4.x0;
 		}
-		
-	public:
-		//! @brief A nullary constructor for Cython
+	
+	// (29.09.2018 @ 12:20)	
+	// Change the API since we are always creating a tree just to call GetJets(),
+	// so we don't really need direct access to the tree.
+	//~ public:
+	
+		//! @brief A nullary constructor for Cython (unneeded if we hide access)
 		ShowerParticle(): mother(nullptr), b(nullptr), c(nullptr) {}
 		
-		/*! @brief Build a shower in the CM frame of this particle (the root particle). 
+		/*! @brief Build a shower via a set of dimensionless parameters
 		 * 
-		 *  The shower is constructed in the CM frame of the root,
-		 *  with a mass of exactly one (scale energy as necessary).
-		 *  A boost can be applied to the shower later (if one is needed).
-		 *  Because the power spectrum is invariant to absolute orientation, 
-		 *  the three degrees of freedom defining the absolute orientation 
-		 *  are optional. We explain why in the next paragraph.
+		 *  The shower is constructed with an energy of exactly one (scale as necessary).
+		 *  The power spectrum is invariant to absolute orientation, 
+		 *  so the three degrees of freedom defining the absolute orientation
+		 *  are \em optional (as are the three d.o.f. for the system's boost).
 		 * 
-		 *  Because the root node is defined in its CM frame,
-		 *  the two root daughters are back-to-back, which makes their 
-		 *  polarization vector (and hence polarization rotation angle) 
-		 *  ill-defined (i.e., any vector in the 
-		 *  orthogonal plane is orthogonal to both daughters).		 
+		 *  The \p params_splitting define the system in the CM frame of the root,
+		 *  where the two root daughters are back-to-back. As a result, 
+		 *  the root polarization vector is ill-defined (i.e., any vector in the 
+		 *  orthogonal plane is orthogonal to both daughters).
 		 *  Additionally, since \f$ \beta_a = 0 \f$,
-		 *  \f$ z_+ = z_- \f$ and \f$ z^* \f$ is meaningless.
-		 *  Yet these two degrees of freedom do not disappear, 
-		 *  they merely transform into the two d.o.f. defining the 
-		 *  \em axis of the two original daughters.
-		 *  When one of these original daughter's splits, 
-		 *  their non-zero speed releases \f$ and z^* \f$, 
-		 *  but \f$ \phi \f$ remains ill-defined
-		 *  because there is no existing polarization vector.
-		 *  Thus, the absolute orientation of the splitting tree
-		 *  requires defining these three d.o.f.
-		 *  (two to define the root axis, and one to define the 
-		 *  polarization of the first splitting, via its azimuthal position 
-		 *  about the root axis).
+		 *  \f$ z_+ = z_- \f$ and \f$ z^* \f$ is meaningless for the 0th splitting.
+		 *  Additionally, with an ill-defined root polarization,
+		 *  the rotation angle of the 1st splitting is also ill-defined.
+		 *  These three degrees of freedom do not simply disappear, 
+		 *  they manifest as the orientation of the whole system.
 		 * 
-		 *  Recall that the power spectrum is invariant to absolute orientation, 
-		 *  so defining the three orientation d.o.f. may not be necessary. 
-		 *  Thus, we default to an arbitrary orientation of the root splitting:
-		 *  the root axis is the \em z axis,  with daughter \em b going in the 
-		    \f$ +\hat{z} \f$ direction, and the root polarization is the \em x axis.
-		 *  If the three optional orientation d.o.f. are supplied, 
-		 *  they record the following orientation variables:
+		 *  We start by defining an arbitrary orientation of the root/0th splitting:
+		 *  the root axis is the \em z axis, with daughter \em b going in the 
+		 *  \f$ +\hat{z} \f$ direction, and the root polarization is the \em x axis.
+		 *  If \p params_orientation are supplied, 
+		 *  the first three record the following orientation variables:
 		 *  
 		 *   - \f$ \theta_0 \f$: The polar angle of root daughter \em b
 		 *     (relative to the \f$ +\hat{z} \f$).
@@ -415,13 +413,23 @@ class ShowerParticle : public ShapedJet
 		 *  If there is a second splitting, regardless of whether it is 
 		 *  root daughter \em b or \em c, it will use the root polarization
 		 *  with \f$ \phi = 0 \f$ (i.e., the plane of the second splitting 
-		 *  is defined by the root polarization, so \f$ \omega_0 \f$ orients this plane).
+		 *  is defined by the root polarization, so \f$ \omega_0 \f$ orients the 3-jet plane).
 		 * 
-		 *  Given this paradigm, the root splitting needs only two kinematic parameters, 
-		 *  and the second splitting only three kinematic parameters. 
+		 *  Given the three optional orientation parameters, 
+		 *  the CM frame of the tree is still motionless.
+		 *  Three more optional parameters define the CM boost \f$ \vec{\beta} \f$:
+		 *  
+		 *   - \f$ \beta \f$: The speed of the CM frame.
+		 * 
+		 *   - \f$ \eta_{\beta} \f$: The pseudorapidity of the boost vector.
+		 * 
+		 *   - \f$ \phi_{\beta} \f$: The azimuthal angle of the CM frame.
+		 * 
+		 *  Given this paradigm, the root/0th splitting needs only two splitting parameters, 
+		 *  and the 1st splitting only three kinematic parameters. 
 		 *  All additional nodes need the full four parameters.
 		 *  
-		 *  \param params_kinematic
+		 *  \param params_splitting
 		 *  The params specifying a k-node tree, with either
 		 *  2 or 5 + 4(k-2) parameters
 		 *  \verbatim
@@ -435,10 +443,15 @@ class ShowerParticle : public ShapedJet
 		 *  A vector of addresses to specify the location of all nodes after the root node
 		 *  (i.e. the root particle needs no address).
 		 * 
-		 *  \param params_orientation
-		 *  The three orientation parameters described above: \verbatim
-		    {theta_0, phi_0, omega_0}. \endverbatim
-		 *  This vector shall either be empty or contain exactly three parameters.
+		 *  \param params_optional
+		 *  The three orientation parameters described above,
+		 *  and possibly the three boost parameters: \verbatim
+		    {theta_0, phi_0, omega_0, [beta, eta_beta, phi_beta]}. \endverbatim
+		 *  This vector shall contain exactly 0, 3, or 6 parameters.
+		 *  If it contains 3 parameters, they are \em always 
+		 *  interpreted as orientation parameters (never boost parameters). 
+		 *  This is because an oriented boost makes little sense if the 
+		 *  CM frame is unoriented.
 		 * 
 		 *  \throw Throws \c std::invalid_argument if \p params_kinematic 
 		 *  does not have the correct length for a k-node tree.
@@ -449,26 +462,10 @@ class ShowerParticle : public ShapedJet
 		 *  \throw Throws \c std::invalid_argument if \p params_orientation.size()
 		 *  is not zero or three.
 		*/ 
-		ShowerParticle(std::vector<real_t> const& params_kinematic, 
-			std::vector<std::vector<bool>> const& addresses = {},
-			std::vector<real_t> const& params_orientation = {});
-			
-		/*! @brief Build a shower in the CM frame of this particle (the root particle)
-		 *  using one long list of parameters.
-		 * 
-		 *  Like the main constructor, but with [orientation, kinematic] 
-		 *  parameters concatenated into the same list (orientation first).
-		 * 
-		 *  \note This function is less safe than the main constructor 
-		 *  because it must \em detect the presence of orientation parameters 
-		 *  and separate them out. It exists so that we can build a shower from 
-		 *  the single list of parameters used by \c scipy.optimize.least_squares.
-		 * 
-		 *  \note We detect the presence of orientation parameters \em only when 
-		 *  <tt> params_orientationKinematic.size() % 4 == 0 </tt>.
-		*/ 
-		static ShowerParticle FromParams_OrientationKinematic(std::vector<real_t> const& params_orientationKinematic, 
-			std::vector<std::vector<bool>> const& addresses = {});
+		ShowerParticle(param_iter_t const splitting_begin, param_iter_t const splitting_end,
+			real_t const mass, 
+			std::vector<std::vector<bool>> const& addresses, 
+			param_iter_t const optional_begin, param_iter_t const optional_end);
 			
 		/*! \defgroup OnlyMove 
 		 *  @brief Nodes cannot be copied, they can only be moved.
@@ -527,6 +524,11 @@ class ShowerParticle : public ShapedJet
 		 *  add up the (absolute) energy lost by all splittings.
 		*/
 		real_t Total_absElost(real_t const absElost_in = real_t(0)) const;
+		
+	public: 
+		static std::vector<ShapedJet> Get_FinalState
+		(std::vector<real_t> const& params, size_t const size_optionalPrefix = 0lu, 
+			std::vector<std::vector<bool>> const& addresses = {});
 };
 
 GCC_IGNORE_POP

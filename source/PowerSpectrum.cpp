@@ -345,6 +345,7 @@ PowerSpectrum::ShapedParticleContainer PowerSpectrum::DetectorObservation::MakeE
 	(real_t const angularResolution, real_t const f_trackR, double const u_trackR) const
 {
 	PowerSpectrum::ShapedParticleContainer container;
+	assert(kdp::AbsRelError(this->fTotal(), real_t(1)) < 1e-8);
 	
 	if(tracks.size())
 	{	
@@ -369,8 +370,10 @@ PowerSpectrum::ShapedParticleContainer PowerSpectrum::DetectorObservation::MakeE
 	else
 	{
 		for(size_t i = 0; i < towers.size(); ++i)
+		{
 			container.emplace_back(towers[i], 
 				ShapeFunction::Make<h_Cap>(std::max(towerArea_min, towerAreas[i])));
+		}
 	}
 	
 	return container;
@@ -509,22 +512,22 @@ std::vector<PowerSpectrum::Job_Hl::shapePtr_t> PowerSpectrum::Job_Hl::CloneShape
 	
 	if(size)
 	{
-		std::map<shapePtr_t, shapePtr_t> cloneMap;
+		std::map<shapePtr_t, shapePtr_t> cloneMap; // map originals to clones
 		
-		// First collect all unique shapes by using cloneMap as a std::set
+		// Collect all unique shapes in shapeVec by first using cloneMap as a std::set
 		// (mapping each unique key to the nullptr placeholder)
 		for(size_t i = 0; i < size; ++i)
 			cloneMap[shapeVec.at(begin + i)] = shapePtr_t(nullptr);
 		
-		// Now map all unique shapes to clones
+		// Now map all unique shapes to clones (replacing the nullptr placeholder)
 		for(auto shape_it = cloneMap.begin(); shape_it not_eq cloneMap.end(); ++shape_it)
 			shape_it->second = shape_it->first->Clone();
 			
-		if(cloneMap.size() > 1) // We replicate cols->shapeVec with the clones. 
+		if(cloneMap.size() > 1) // We replicate cols->shapeVec with the clones.
 		{
 			// Use at() as sanity check, because it throws an exception if the pointer is not found
 			for(size_t i = 0; i < size; ++i)
-				clones.push_back(cloneMap.at(shapeVec.at(begin + i)));
+				clones.push_back(cloneMap.at(shapeVec.at(begin + i)));			
 		}
 		else // Otherwise there is only one unique shape, and it's the only one we need.
 			clones.push_back(cloneMap.begin()->second);
@@ -556,89 +559,111 @@ void PowerSpectrum::Job_Hl::DoTiles()
 		
 		while((tile = NextTile())) // NextTile() returns nullptr when they're gone
 		{
+			assert((tile->num_rows > 0) and (tile->num_cols > 0));
+			
 			++tileCount;
+			bool const diagonal = (symmetric and tile->isDiagonal());
+			// Previously we used an empty colShape to indicate a diagonal tile, 
+			// but an explicit bool is FAR more readable.
 			
 			///////////////////////////////////////////////////////////////
-			// Prepare for dealing with shape functions before the l-loop
+			// Clone shape functions before the l-loop
 			///////////////////////////////////////////////////////////////
 						
 			// Clone replicas of row->shapeVec
 			std::vector<shapePtr_t> const rowShape = CloneShapes(rows->shapeVec, 
 				tile->row_beg, tile->num_rows);
 			
+			assert((rowShape.size() == tile->num_rows) or (rowShape.size() == 1));
+			
 			// A diagonal tile (which only exists in symmetric outer-products)
-			// has the same shape in both rows and cols, so colShape is redundant. 
-			// In this case, we don't waste time copying; leave it empty as a signal
-			std::vector<shapePtr_t> const colShape = 
-				(symmetric and tile->isDiagonal()) ? std::vector<shapePtr_t>() : 
-					// Otherwise clone cols->shapeVec
-					CloneShapes(cols->shapeVec, tile->col_beg, tile->num_cols);
+			// has the same shape in both rows and cols, so colShape is redundant.
+			// In this case, we don't waste time copying
+			std::vector<shapePtr_t> const colShape = diagonal ? 
+				std::vector<shapePtr_t>() : 
+				CloneShapes(cols->shapeVec, tile->col_beg, tile->num_cols);
+				
+			if(not diagonal)
+				assert((colShape.size() == tile->num_cols) or (colShape.size() == 1));
 			
 			// Now that we know what shapes we have, we can determine
-			// when they will be applied to Hl; before or after accumulation.
+			// when they will be applied to Hl -- before or after accumulation.
 			ApplyShapes const applyShapes = [&]()
 			{
-				// An empty colShape indicates a diagonal tile,
-				// so the columns have the same shape as the rows. 			
-				if(colShape.empty())
+				/* We can apply shapes after if there is only 1 shape, 
+				 * because the accumulation does not lose any information
+				 * (shape * {1, 2, 3, 4, 5, 6} = shape * 21. We check for (rowShape.size == 1), 
+				 * rather than (rowShape.size < tile->num_rows), because if 
+				 * (num_rows == 1), the distributive argument still applies.
+				*/ 
+				if(diagonal)
+				{
 				   // IF: there is only one member of rowShape, it means that
-				   // all rows have the same shape (and per colShape, all the columns)
+				   // all rows (and cols, in this diagonal tile) have the same shape ...
 				   return ((rowShape.size() == 1) ? 
-						// THEN the shape can be applied after the accumulation
-						ApplyShapes::after : 
-						ApplyShapes::bothBefore); // ELSE we must apply each row before
-				
-				// Otherwise, we apply the same IF-THEN_ELSE logic as above, 
-				// to rows and columns separately, then construct a bit flag.
-				return BitOr(
-					((rowShape.size() == 1) ? 
-						ApplyShapes::after : ApplyShapes::rowsBefore),
-					((colShape.size() == 1) ? 
-						ApplyShapes::after : ApplyShapes::colsBefore ));
+						ApplyShapes::after : // THEN: apply shape after accumulation
+						ApplyShapes::bothBefore); // ELSE: apply shape before accumulation
+				}
+				else
+				{
+					// Otherwise, we apply the same IF-THEN_ELSE logic as above, 
+					// to rows and columns separately, then construct a bit flag.
+					return BitOr(
+						((rowShape.size() == 1) ? 
+							ApplyShapes::after : ApplyShapes::rowsBefore),
+						((colShape.size() == 1) ? 
+							ApplyShapes::after : ApplyShapes::colsBefore ));
+				}
 			}();
 			
-			// When we will the shape, we will need a controlling tile.
+			// When we apply the shape, we will need a controlling tile.
 			// The sources will be local arrays rowShape_l and colShape_l, 
-			// so we reset row/col_beg.
+			// so we zero-out row/col_beg.
 			TileSpecs const shapeTile(0, tile->num_rows, 0, tile->num_cols);
 						
 			///////////////////////////////////////////////////////////////
 			// Prepare for the l-loop by calculating inter-particle weights and dot-products
 			///////////////////////////////////////////////////////////////
 			
-			// Zero out the working arrays. Only necessary once per tile because 
-			// each tile will fill these arrays the same way at every l in the l-loop,
-			// so any zero-buffer will remain zero.
+			// Zero out the working arrays. Only do once per tile because 
+			// each tile will always fill these arrays the same way in the l-loop,
+			// so any necessary zero-buffer will remain zero.
 			Pl_computer.z.fill(real_t(0));
 			fProd.fill(real_t(0));
 			Hl_accumulate.fill(real_t(0));
 			rowShape_l.fill(real_t(0));
 			colShape_l.fill(real_t(0));
 			
-			// We store how long the altered region is (fill.size), 
-			// and whether the fill is ragged (fill.ragged).
-			// All other tiles will be tilled like fProd (since they all share 
+			// Store information about the fill (length of the altered region and
+			// fill pattern). All other tiles will be tilled like fProd (since they all share 
 			// the same TileSpecs), so we only need to store the TileFill once.
 			TileFill const fill = symmetric ? 
 				FillTile_Symmetric<Equals>(fProd, *tile, rows->f) : 
 				FillTile<Equals>(fProd, *tile, rows->f, cols->f);
 				
-			// For symmetric tiles, the symmetry factor should only be applied
-			// once, and has already been applied to fProd. 
-			// Thus, p^_i . p^_j proceeds via the normal FillTile, regardless of symmetry.
-			FillTile<Equals>(Pl_computer.z, *tile, rows->x, cols->x);
-			FillTile<PlusEquals>(Pl_computer.z, *tile, rows->y, cols->y);
-			FillTile<PlusEquals>(Pl_computer.z, *tile, rows->z, cols->z);
-			
-			// (fill.size) tells us the size of fProd and Pl_computer.z which are altered, 
-			// and we this size will limit the inner product when we fill Hl_accumulate.
-			// Similarly, we only want to sum up the filled portion of Hl_accumulate.
-			// However, because BinaryAccumulate must start with a power-of-2 size, 
-			// we start with the smallest power-of-2 which covers the filled portion.
-			size_t const sumSize = kdp::IsPowerOfTwo(fill.size) ? fill.size : 
+			// For symmetric tiles, the symmetry factor should only be applied once,
+			// and has already been applied to fProd. Thus, p^_i . p^_j proceeds via 
+			// the normal FillTile, regardless of symmetry.
+			{
+				auto const fill_pDot = 
+				    FillTile<Equals>(Pl_computer.z, *tile, rows->x, cols->x);
+				FillTile<PlusEquals>(Pl_computer.z, *tile, rows->y, cols->y);
+				FillTile<PlusEquals>(Pl_computer.z, *tile, rows->z, cols->z);
+				
+				assert(fill_pDot == fill); // Verify the filling is the same
+			}
+				
+			/* (fill.size) tells us the size of fProd and Pl_computer.z which are altered, 
+			 * and this variable will bound the inner product when we fill Hl_accumulate.
+			 * Similarly, we only want to sum up the filled portion of Hl_accumulate.
+			 * However, because BinaryAccumulate must start with a power-of-2 size, 
+			 * we start with the smallest power-of-2 which covers the filled portion.
+			*/ 
+			size_t const sumSize = kdp::IsPowerOfTwo(fill.size) ? 
+				fill.size : 
 				2 * kdp::LargestBit(fill.size);
 			assert(sumSize <= TileSpecs::incrementSize);
-			assert(sumSize >= fill.size);			
+			assert(sumSize >= fill.size);
 			
 			// Prepare to iterate (telling Pl_computer that we only need to
 			// update the filled region of Pl_computer.z).
@@ -653,7 +678,7 @@ void PowerSpectrum::Job_Hl::DoTiles()
 					Pl_computer.Next();
 				assert(Pl_computer.l() == l);
 				
-				// Do the calculation for delta-distribution particles
+				// Do the inner-product for delta-distribution particles
 				for(size_t k = 0; k < fill.size; ++k)
 					Hl_accumulate[k] = Pl_computer.P_l()[k] * fProd[k];
 				
@@ -661,39 +686,45 @@ void PowerSpectrum::Job_Hl::DoTiles()
 				// Multiply Hl_accumulate by particle shape
 				////////////////////////////////////////////////////////////
 				
-				// First cache the numerical values of row and column shapes
+				// First cache the numerical values of row and column shapes				
+				for(size_t i = 0; i < rowShape.size(); ++i)
+					rowShape_l[i] = rowShape[i]->hl(l);
 				
-				if(IsBefore(BitAnd(applyShapes, ApplyShapes::rowsBefore)))
-				{
-					for(size_t i = 0; i < rowShape.size(); ++i)
-						rowShape_l[i] = rowShape[i]->hl(l);
-				}
-				
-				if(IsBefore(BitAnd(applyShapes, ApplyShapes::colsBefore)))
-				{
-					// colShape may be empty if a diagonal tile, but this loop is safe
-					for(size_t j = 0; j < colShape.size(); ++j)
-						colShape_l[j] = colShape[j]->hl(l);
-				}
+				// colShape may be empty if the tile is diagonal, but this loop is safe
+				for(size_t j = 0; j < colShape.size(); ++j)
+					colShape_l[j] = colShape[j]->hl(l);
 				
 				// Shapes multiply the existing Hl_accumulate
 				switch(applyShapes)
 				{
 					case ApplyShapes::bothBefore:
-						
-						if(colShape.empty()) // A diagonal tile
-							FillTile_Symmetric<TimesEquals>(Hl_accumulate, shapeTile, rowShape_l);
+												
+						if(diagonal)
+						{
+							// The symmetry factor was already applied to fProd,
+							// so we send a symmetry factor of 1
+							auto const fill_shape = 
+								FillTile_Symmetric<TimesEquals>(Hl_accumulate, 
+									shapeTile, rowShape_l, real_t(1));
+							assert(fill_shape == fill);
+						}
 						else
+						{
+							assert(rowShape.size() == tile->num_rows);
+							assert(colShape.size() == tile->num_cols);							
+							
 							FillTile<TimesEquals>(Hl_accumulate, shapeTile, rowShape_l, colShape_l);
-					
+						}
 					break;
 					
-					case ApplyShapes::rowsBefore:						
+					case ApplyShapes::rowsBefore:
+						assert(rowShape.size() == tile->num_rows);
 						FillTile_Rows<TimesEquals>(Hl_accumulate, shapeTile, rowShape_l, 
 							fill.isTriangular());
 					break;
 					
 					case ApplyShapes::colsBefore:
+						assert(colShape.size() == tile->num_cols);
 						FillTile_Cols<TimesEquals>(Hl_accumulate, shapeTile, colShape_l, 
 							fill.isTriangular());
 					break;
@@ -701,35 +732,38 @@ void PowerSpectrum::Job_Hl::DoTiles()
 					default: // Apply shapes after; nothing to do here
 					break;
 				}
-				
-				// Now that we've applied all before shapes, we can accumulate all the terms
-				real_t Hl_sum = kdp::BinaryAccumulate_Destructive(Hl_accumulate, sumSize);
-				
-				switch(applyShapes) // We must now apply any after shapes
+							
+				// Having applied all shapes that must come before accumulation, we accumulate
+				real_t Hl_sum = kdp::BinaryAccumulate_Destructive(Hl_accumulate, sumSize);				
+												
+				switch(applyShapes) // Now apply shapes after accumulation
 				{
 					case ApplyShapes::bothBefore: // Nothing to do, already done
 					break;
 					
 					case ApplyShapes::rowsBefore:
-						assert(colShape.size());
-						Hl_sum *= colShape.front()->hl(l);
+						assert(colShape.size() == 1);
+						Hl_sum *= colShape_l[0];
 					break;
 					
 					case ApplyShapes::colsBefore:
-						assert(rowShape.size());
-						Hl_sum *= rowShape.front()->hl(l);
+						assert(rowShape.size() == 1);
+						Hl_sum *= rowShape_l[0];
 					break;
 					
 					case ApplyShapes::after:
-						Hl_sum *= (colShape.empty() ? kdp::Squared(rowShape.front()->hl(l)) : 
-						rowShape.front()->hl(l) * colShape.front()->hl(l));
+						assert(rowShape.size() == 1);
+						assert(colShape.size() <= 1);
+						Hl_sum *= (diagonal ? 
+							kdp::Squared(rowShape_l[0]) : 
+							rowShape_l[0] * colShape_l[0]);
 					break;
 				}
 				
 				hl_partial[l - 1] += Hl_sum; // l = 0 is not stored
 			}// end l-loop
 		}// end NextTile loop
-	}// end array allocation
+	}// end array allocation	
 			
 	// No more tiles; this thread is done doing major work.
 	// Since it has nothing better to do, use the thread to 

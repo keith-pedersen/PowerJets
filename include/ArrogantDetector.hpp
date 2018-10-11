@@ -118,6 +118,8 @@ class ArrogantDetector
 		using vec4_t = kdp::Vector4<double>; //!< @brief The 4-vector type
 		using DetectorObservation = PowerSpectrum::DetectorObservation;
 		
+		enum class METcorrection {None, ToAllTowers};
+		
 		static constexpr char const* detectorName_default = "Detector";
 	
 		/*! @brief The main ArrogantDetector settings, read from a parsed INI file
@@ -221,7 +223,9 @@ class ArrogantDetector
 		//////////////////////////////////////////////////////////////////
 		
 		void Clear(); //!< @brief Clear the detector before filling.
-		void Finalize(bool const correctMisingE = true); //!< @brief Finalize the detector (e.g., write-out calorimeter) after filling.
+		
+		//! @brief Finalize the detector (e.g., write-out calorimeter) after filling.
+		void Finalize(METcorrection const method = METcorrection::None);
 		
 		//////////////////////////////////////////////////////////////////
 		//////////////////////////////////////////////////////////////////
@@ -406,7 +410,7 @@ class ArrogantDetector
 		 * 
 		 *  By default, missing energy is opposite all observed energy.
 		*/ 
-		virtual void AddMissingE();
+		virtual void AddMissingE(METcorrection const method);
 		
 		/*! @brief Initalize the calorimeter from beltEdges_eta and DeltaPhi().
 		 * 

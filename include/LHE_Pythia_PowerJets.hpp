@@ -76,6 +76,7 @@ class LHE_Pythia_PowerJets
 		using PhatFvec = PowerSpectrum::PhatFvec;
 		using ShapedParticleContainer = PowerSpectrum::ShapedParticleContainer;
 		using DetectorObservation = PowerSpectrum::DetectorObservation;
+		using METcorrection = ArrogantDetector::METcorrection;
 
 		using vec3_t = ArrogantDetector::vec3_t; //! @brief The 3-vector type
 		using vec4_t = ArrogantDetector::vec4_t; //! @brief The 4-vector type
@@ -315,8 +316,8 @@ class LHE_Pythia_PowerJets
 		 *  This ensures that event_10 will look the same whether or not 
 		 *  event_0 through event_9 are analyzed.
 		*/  
-		Status Next_internal(bool doWork);		
-		Status DoWork(); //!< @brief Detect and analyze the event
+		Status Next_internal(bool const doWork, METcorrection const method = METcorrection::None);
+		Status DoWork(METcorrection const method); //!< @brief Detect and analyze the event
 		
 		//! @brief Initialize a FastJet clustering algorithm and pileup subtractor
 		void Initialize_FastJet();
@@ -349,10 +350,13 @@ class LHE_Pythia_PowerJets
 		 * 
 		 *  \returns Returns the status of the generator.
 		*/
-		Status Next() {return Next_internal(true);} // doWork = true
+		Status Next(METcorrection const method = METcorrection::None)
+		{
+			return Next_internal(true, method); // doWork = true
+		}
 		
 		//! @brief Repeat detection (which includes re-generating pileup)
-		Status Repeat() {return DoWork();}
+		Status Repeat(METcorrection const method = METcorrection::None) {return DoWork(method);}
 		
 		void Set_PileupMu(double const pileup_mu);
 		
@@ -387,6 +391,9 @@ class LHE_Pythia_PowerJets
 		
 		//! @brief Calculate the power spectrum of the observed final state using the natural resolution
 		std::vector<real_t> const& Get_Hl_Obs(size_t const lMax) const;
+		
+		//! @brief Calculate the power spectrum of the observed final state using the natural resolution
+		std::vector<real_t> Get_Hl_ME(size_t const lMax) const;		
 		
 		/*! @brief Calculate the power spectrum of an ensemble of ShapedJet's and pileup
 		 * 

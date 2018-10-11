@@ -160,7 +160,7 @@ int main(int argCnt, char const** const argVec)
 				
 		if(iEvent >= settings.skipEvents)
 		{
-			detector->Finalize(false); // Write out the detector (false = no missing E correction)
+			detector->Finalize(); // no argument means no missing E correction
 			
 			auto const observation = detector->GetObservation();
 			

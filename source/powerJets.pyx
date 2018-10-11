@@ -99,9 +99,8 @@ cdef extern from "NjetModel.hpp":
 #~ 		ShowerParticle(const vector[double]&, const vector[vector[bool]]&, ) except +
 		
 		@staticmethod
-		ShowerParticle FromParams_OrientationKinematic(const vector[double]&, const vector[vector[bool]]&) except +
-			
-		vector[ShapedJet] GetJets() const
+		vector[ShapedJet] Get_FinalState(const vector[double]&, const size_t, 
+			const vector[vector[bool]]&) except +
 		
 #~ 	cdef cppclass NjetModel_c "NjetModel":
 #~ 		# The nested class for internal reuse by H_l_JetParticle
@@ -154,11 +153,12 @@ cdef extern from "LHE_Pythia_PowerJets.hpp":
 		const ArrogantDetector* Get_Detector() const
 #~ 		const vector[PhatF]& Get_Detected_PhatF()
 #~ 		const vector[double]& Get_H_det(const size_t lMax)	
-		const vector[double]& Get_Hl_Obs(const size_t lMax) const
+		const vector[double]& Get_Hl_Obs(const size_t lMax) except +
+		vector[double] Get_Hl_ME(const size_t lMax) except +
 		vector[double] Get_Hl_Jet(const size_t lMax, const vector[ShapedJet]&) except +
 		vector[double] Get_Hl_Jet(const size_t lMax, const vector[ShapedJet]&, const double) except +
-		vector[double] Get_Hl_Hybrid(const size_t lMax, const vector[ShapedJet]&) const
-		vector[double] Get_Hl_Hybrid(const size_t lMax, const vector[ShapedJet]&, const double) const
+		vector[double] Get_Hl_Hybrid(const size_t lMax, const vector[ShapedJet]&) except +
+		vector[double] Get_Hl_Hybrid(const size_t lMax, const vector[ShapedJet]&, const double) except +
 		const vector[Jet]& Get_ME() const
 		vector[Jet] Cluster_FastJets(const bool) const
 		double Get_RhoPileup() const
@@ -266,6 +266,10 @@ cdef class _PowerJets:
 		return StdVecToNumpy(self.c_pythia.Get_Hl_Obs(lMax))
 		
 	#####################################################################
+	def Hl_ME(self, const int lMax = 128):
+		return StdVecToNumpy(self.c_pythia.Get_Hl_ME(lMax))
+		
+	#####################################################################
 	def Get_Tracks(self):
 		# Have to make a copy because Cython doesn't know about const_iterator
 		cdef vector[Vec3_c] tracks = deref(self.c_pythia.Get_Detector()).Tracks()
@@ -337,8 +341,20 @@ cdef class _PowerJets:
 		dict jetParamDict, const int nShapeParams) except+:
 		'''Interpret the jet parameters as a splitting tree.'''
 		
-		return ShowerParticle.FromParams_OrientationKinematic(jetParams, 
-			jetParamDict.get("addresses", list())).GetJets()
+		cdef size_t optional = 0
+		
+		if(jetParamDict.get("orientation", False)):
+			optional += 3
+			
+			if(jetParamDict.get("boost", False)):
+				optional += 3
+		
+#~ 		print(len(jetParams) - optional)
+#~ 		print(len(jetParams))
+#~ 		print(jetParams)
+		
+		return ShowerParticle.Get_FinalState(jetParams, optional,
+			jetParamDict.get("addresses", list()))
 			
 	#####################################################################
 	
@@ -348,10 +364,14 @@ cdef class _PowerJets:
 		'''The internal GetJets, which deals with the pileup fraction and 
 		switches between the parameter style.'''	
 		
+#~ 		print("test:", len(jetParams))
+		
 		######################
 		# discard jet fraction (I believe this does not alter the argument, but I'm not totally sure)
-		if (jetParamDict.get(pileup_key, True)):
+		if (jetParamDict.get(pileup_key, False)):
 			jetParams = jetParams[1:]
+			
+#~ 		print("test:", len(jetParams))
 			
 		#######################
 		# determine param style
@@ -437,7 +457,7 @@ cdef class _PowerJets:
 	
 	#####################################################################
 	
-	def Hl_Jet(self, jetParams, dict jetParamDict = {}, int lMax=128):
+	def Hl_Jet(self, jetParams, dict jetParamDict, int lMax=128):
 		'''Given jetParams in the correct format (see GetJets),
 		return the power specturm Hl_jet.'''
 
@@ -449,6 +469,10 @@ cdef class _PowerJets:
 		cdef bool hybrid = jetParamDict.get('hybrid', False)
 			
 		cdef vector[ShapedJet] jets = _PowerJets._GetJets(numpy.asarray(jetParams), jetParamDict)
+		
+#~ 		print()
+#~ 		for jet in jets:
+#~ 			print(jet.p4.x0, jet.p4.Eta(), jet.p4.Phi())
 				
 		if(hybrid):
 			return StdVecToNumpy(self.c_pythia.Get_Hl_Hybrid(lMax, jets, f_PU))
@@ -489,7 +513,7 @@ cdef class _PowerJets:
 #~ 		/numpy.power(numpy.arange(1, len(fit) + 1), 0.5)
 			
 
-	def Hl_Jet_error_vec(self, jetParams, dict jetParamDict, int lMax, lAsym = [],
+	def Hl_Jet_error_vec(self, jetParams, dict jetParamDict, int lMax, lAsym = (),
 		const bool relative = False):
 		''' Given jetParams in the correct format (see GetJets),
 			return the vector of residuals (chi_l = H_l_jet - H_l_obs).
@@ -515,7 +539,7 @@ cdef class _PowerJets:
 		return _PowerJets._Hl_error_vec(Hl_fit, Hl_obs, relative)
 		
 	def Hl_Jet_error_vec_oneSplit(self, newParams, existingParams, 
-		dict jetParamDict, int lMax, lAsym = [],
+		dict jetParamDict, int lMax, lAsym = (),
 		const bool relative = False):
 		''' Given jetParams in the correct format (see GetJets),
 			return the vector of residuals (chi_l = H_l_jet - H_l_obs).
